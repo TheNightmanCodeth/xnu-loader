@@ -347,6 +347,10 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   EFI_PHYSICAL_ADDRESS bootinfo_guard_base = 0;
   UINTN bootinfo_guard_pages = 0;
 
+  /* ramdisk_phys/ramdisk_size are only written when their feature is used.
+   * left as stack garbage they become a bogus /chosen RAMDisk and a post-EBS
+   * cache clean over an unmapped range. This causes a silent hang on hardware */
+  SetMem(&ctx, sizeof(ctx), 0);
   status = app_init(&ctx, image, st);
   if (EFI_ERROR(status))
     return status;
