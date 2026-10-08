@@ -333,6 +333,7 @@ out:
   return ok;
 }
 
+#if defined(__riscv)
 static BOOLEAN node_is_cpu(DeviceTreeNode *node) {
   for (UINT32 i = 0; i < node->nProperties; i++) {
     DeviceTreeNodeProperty *p = node->properties[i];
@@ -342,6 +343,7 @@ static BOOLEAN node_is_cpu(DeviceTreeNode *node) {
   }
   return FALSE;
 }
+#endif
 
 #if defined(__aarch64__)
 // nodes the arm64 loader builds itself or the kernel has no use for, and whatever is switched off.
@@ -427,8 +429,8 @@ EFI_STATUS dt_import_fdt(AppContext *ctx, DeviceTreeNode *root, DeviceTreeNode *
     } else if (tok == FDT_END_NODE) {
       if (depth == 0)
         break;
-      FdtLevel *lv = &levels[depth - 1];
 #if defined(__riscv)
+      FdtLevel *lv = &levels[depth - 1];
       // the kernel takes the cpu marked running as the boot hart
       if (lv->node && lv->node != root && lv->have_reg && node_is_cpu(lv->node)) {
         add_str(ctx, lv->node, "state", lv->reg == ctx->boot_hartid ? "running" : "waiting");

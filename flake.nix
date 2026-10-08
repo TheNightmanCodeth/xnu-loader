@@ -11,9 +11,19 @@
   in {
     packages = forAllSystems (system: let
       pkgs = import nixpkgs { inherit system; };
+      # x86 targets are cross built from other hosts, like the arm ones; same-platform
+      # pkgsCross is the native set. ia32 keeps multilib on x86_64-linux.
+      x86 = pkgs.pkgsCross.gnu64;
+      i686 = if system == "x86_64-linux" then pkgs.pkgsi686Linux else pkgs.pkgsCross.gnu32;
+      # grub-mkimage runs here but packs x86 modules, which nixpkgs grub only has on x86_64-linux
+      grubTools = target: platform: pkgs.callPackage ./kernel/grub-tools.nix {
+        inherit target platform;
+        targetCc = x86.stdenv.cc;
+      };
+      grubPc = if system == "x86_64-linux" then pkgs.grub2 else grubTools "i386" "pc";
+      grubEfi = if system == "x86_64-linux" then pkgs.grub2_efi else grubTools "x86_64" "efi";
     in {
-      default = pkgs.callPackage ./. {};
-      hello = pkgs.callPackage ./hello.nix {};
+      default = x86.callPackage ./. {};
       arm64 = pkgs.pkgsCross.aarch64-multiplatform.callPackage ./. {
         arch = "aarch64";
         platform = "bcm2837";
@@ -31,12 +41,12 @@
         arch = "aarch64";
         platform = "sc8280xp";
       };
-      ia32 = pkgs.pkgsi686Linux.callPackage ./. {
+      ia32 = i686.callPackage ./. {
         arch = "x86_64";
         loaderArch = "ia32";
       };
 
-      legacy-boot = pkgs.callPackage ./legacy { };
+      legacy-boot = x86.callPackage ./legacy { };
       # The loader as an arm64 Linux Image (U-Boot booti, QEMU -kernel).
       kernel-arm64 = pkgs.pkgsCross.aarch64-multiplatform.callPackage ./kernel/arm64.nix { };
       kernel-arm64-sun50i = pkgs.pkgsCross.aarch64-multiplatform.callPackage ./kernel/arm64.nix {
@@ -75,12 +85,14 @@
         platform = "a20";
       };
       # The loader as a Multiboot2 ELF kernel (GRUB etc.).
-      kernel-multiboot2 = pkgs.callPackage ./kernel { };
+      kernel-multiboot2 = x86.callPackage ./kernel { };
       kernel-grub-bios = pkgs.callPackage ./kernel/grub-bios.nix {
-        loaderKernel = pkgs.callPackage ./kernel { };
+        grub2 = grubPc;
+        loaderKernel = x86.callPackage ./kernel { };
       };
       kernel-grub-efi = pkgs.callPackage ./kernel/grub-efi.nix {
-        loaderKernel = pkgs.callPackage ./kernel { };
+        grub2_efi = grubEfi;
+        loaderKernel = x86.callPackage ./kernel { };
       };
     });
   };

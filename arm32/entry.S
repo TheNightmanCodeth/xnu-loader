@@ -185,3 +185,5 @@ boot32_jump:
 	dsb
 	isb
 	bx	r4
+
+.section .note.GNU-stack,"",%progbits

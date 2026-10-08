@@ -1,6 +1,5 @@
 { stdenv
 , lib
-, binutils
 , gnu-efi
 , nasm
 , embeddedInitrd ? null
@@ -11,7 +10,7 @@ stdenv.mkDerivation {
   version = "0.1";
   src = ../.;
 
-  nativeBuildInputs = [ binutils nasm ];
+  nativeBuildInputs = [ nasm ];
   dontConfigure = true;
 
   buildPhase = ''
@@ -52,8 +51,8 @@ stdenv.mkDerivation {
       -L${gnu-efi}/lib -lgnuefi -lefi "$libgcc"
 
     # bzImage: setup sectors, then the flat payload from __kernel_start.
-    objcopy -O binary -R .bss build/xnu-loader.elf build/payload.bin
-    sym() { nm build/xnu-loader.elf | awk -v s="$1" '$3 == s { print "0x" $1 }'; }
+    $OBJCOPY -O binary -R .bss build/xnu-loader.elf build/payload.bin
+    sym() { $NM build/xnu-loader.elf | awk -v s="$1" '$3 == s { print "0x" $1 }'; }
     payload_size=$(stat -c %s build/payload.bin)
     file_end=$(( $(sym __file_end) - $(sym __kernel_start) ))
     [ "$payload_size" -eq "$file_end" ] || { echo "payload size mismatch"; exit 1; }
