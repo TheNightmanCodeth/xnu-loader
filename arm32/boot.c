@@ -23,6 +23,7 @@ static const struct board board_rv1106_info = {
   "rockchip,rv110", "Rockchip RV1106/RV1103", "puredarwin,rv1103", "Luckfox Pico (RV1103)",
   0xff4c0000, 0xff5a0000, 0xff3b0000 + 0xc10, 0x4000000, 0, 0, 0, 0, 0,
 };
+#if !defined(XNU_LOADER_PLATFORM_QEMUVIRT)
 // wdt0, clocked and out of reset through CRU_GATE_CON06 and CRU_SOFTRST_CON06 bits 9 and 10
 static const struct board board_rk3506_info = {
   "rockchip,rk3506", "Rockchip RK3506", "puredarwin,rk3506", "Luckfox Lyra (RK3506)",
@@ -38,6 +39,7 @@ static const struct board board_a20_info = {
   0x01c28000, 0, 0, 0x40000000, 0x40000000, 0x01c81000,
   0, 0, 0,
 };
+#endif
 
 // cntvoff is unknown out of reset and only monitor mode with scr.ns set can write it; the
 // kernel's cores all read the virtual counter, so zero it here and in the kernel's core pen

@@ -36,9 +36,11 @@ stdenv.mkDerivation rec {
     cmake
     coreutils
     dosfstools
-    gnu-efi
     mtools
   ];
+
+  # the target's gnu-efi, which cross builds would otherwise take for the build machine
+  buildInputs = [ gnu-efi ];
 
   cmakeFlags = [
     "-DGNU_EFI_DIR=${gnu-efi}"

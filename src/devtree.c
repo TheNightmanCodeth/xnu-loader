@@ -204,8 +204,8 @@ UINT32 dt_flatten_node(DeviceTreeNode *node, UINT8 *buf) {
   return offset;
 }
 
-static void dt_prop(AppContext *ctx, DeviceTreeNode *node, const CHAR8 *name, VOID *data, UINT32 len) {
-  DeviceTreeNodeProperty *p = dt_create_property(ctx, name, data, len);
+static void dt_prop(AppContext *ctx, DeviceTreeNode *node, const CHAR8 *name, const VOID *data, UINT32 len) {
+  DeviceTreeNodeProperty *p = dt_create_property(ctx, name, (VOID *)data, len);
   if (p)
     dt_add_property(ctx, node, p);
 }
@@ -304,6 +304,7 @@ static BOOLEAN smbios_system_uuid(AppContext *ctx, UINT8 out[16]) {
 }
 
 /* Parse "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" into 16 raw bytes. */
+#if defined(__aarch64__)
 /*
  * ACPI MADT ("APIC") lists one GICC entry per CPU (type 0x0B). Per the ACPI
  * spec the flags are at offset 12 (bit 0 = enabled) and the MPIDR at offset 68;
@@ -456,6 +457,7 @@ static UINTN fdt_cpu_mpidrs(AppContext *ctx, UINT64 *out, UINTN max) {
   }
   return found;
 }
+#endif
 
 static BOOLEAN uuid_str_to_bytes(const CHAR8 *str, UINT8 out[16]) {
   UINTN oi = 0;

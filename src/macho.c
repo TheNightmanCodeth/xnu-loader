@@ -3,10 +3,6 @@
 
 #define MACHO_NAME_MAX 16
 
-static UINT64 align_up(UINT64 value, UINT64 align) {
-  return (value + (align - 1)) & ~(align - 1);
-}
-
 static VOID macho_copy_segname(CHAR16 *out16, const CHAR8 *in8) {
   UINTN i;
   for (i = 0; i < MACHO_NAME_MAX && in8[i] != '\0'; i++)

@@ -11,9 +11,11 @@
 static VOID   *g_jump_entry;
 static UINT64  g_jump_args;
 static VOID   *g_jump_stack;
+#if defined(PD_ARCH_X86)
 static UINT64  g_copy_src;
 static UINT64  g_copy_dst;
 static UINT64  g_copy_bytes;
+#endif
 
 static BOOLEAN boot_args_has_rd(const CHAR8 *args) {
   if (!args)
@@ -25,6 +27,8 @@ static BOOLEAN boot_args_has_rd(const CHAR8 *args) {
   return FALSE;
 }
 
+// unused while its call below is disabled
+__attribute__((unused))
 static EFI_STATUS append_ramdisk_boot_arg(
     AppContext *ctx, const CHAR8 **cmdline, BOOLEAN *owned) {
   const CHAR8 suffix[] = " ";

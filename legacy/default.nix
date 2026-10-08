@@ -1,7 +1,6 @@
 { stdenv
 , lib
 , nasm
-, binutils
 , gnu-efi
 , dosfstools
 , mtools
@@ -16,7 +15,7 @@ stdenv.mkDerivation {
   version = "0.1";
   src = ../.;
 
-  nativeBuildInputs = [ nasm binutils dosfstools mtools coreutils ];
+  nativeBuildInputs = [ nasm dosfstools mtools coreutils ];
   dontConfigure = true;
 
   buildPhase = ''
@@ -49,11 +48,11 @@ stdenv.mkDerivation {
       loader_objects="$loader_objects $object"
     done
     libgcc="$($CC -m64 -print-libgcc-file-name)"
-    $LD -nostdlib --allow-multiple-definition -T legacy/linker.ld \
+    $LD -nostdlib --allow-multiple-definition --no-warn-rwx-segments -T legacy/linker.ld \
       -o build/payload.elf \
       build/entry.o $shim_objects $loader_objects \
       -L${gnu-efi}/lib -lgnuefi -lefi "$libgcc"
-    objcopy -O binary build/payload.elf build/payload.bin
+    $OBJCOPY -O binary build/payload.elf build/payload.bin
     payload_sectors=$((($(stat -c %s build/payload.bin) + 511) / 512))
 
     # Stage-two size is independent of these values, so one sizing pass gives
