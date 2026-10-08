@@ -54,9 +54,9 @@ stdenvNoCC.mkDerivation {
     $cc -c kernel/entry/embedded.S -o build/entry-embedded.S.o -fpie \
       ${lib.optionalString (embeddedInitrd != null) "'-DEMBED_CPIO=\"${embeddedInitrd}\"'"}
     objects="$objects build/entry-embedded.S.o"
-    for source in kernel/riscv64.c kernel/cpio.c efi-emulation/exceptions.c efi-emulation/firmware.c \
+    for source in kernel/riscv64.c kernel/fdt_boot.c kernel/cpio.c efi-emulation/exceptions.c efi-emulation/firmware.c \
       efi-emulation/modfs.c efi-emulation/storage.c \
-      src/riscv64.c src/app.c src/boot.c src/console.c src/devtree.c src/devtree-fdt.c \
+      src/riscv64.c src/app.c src/boot.c src/console.c src/devtree.c src/devtree-fdt.c src/fdt.c \
       src/fileio.c src/lowmem.c src/macho.c src/serial.c; do
       object="build/$(basename "$(dirname "$source")")-$(basename "$source").o"
       $cc -c "$source" -o "$object" $common $defines $includes

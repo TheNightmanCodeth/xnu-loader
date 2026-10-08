@@ -95,6 +95,22 @@ EFI_HANDLE efiemu_disk_handle(void);
 void efiemu_exceptions_install(void);
 /* newc cpio: each regular file becomes a module the loader can open */
 void kernel_parse_cpio(EfiEmuBootInfo *info, UINT64 start, UINT64 size);
+
+/* Linux Image protocol (kernel/fdt_boot.c): what the boot loader's FDT says beyond
+ * what goes straight into EfiEmuBootInfo */
+typedef struct {
+  UINT64 base, size;
+} KernelRange;
+typedef struct {
+  CONST KernelRange *ram;
+  UINT32 nram;
+  UINT64 initrd_start, initrd_end;
+  UINT32 psci;      /* /psci method: 0 none, 1 hvc, 2 smc */
+  UINT64 timebase;  /* /cpus timebase-frequency */
+} KernelFdt;
+BOOLEAN kernel_parse_fdt(EfiEmuBootInfo *info, UINT64 fdt, KernelFdt *out);
+/* Logs ram and reservations, then fills info->memory with one less the other */
+void kernel_fdt_memory_map(EfiEmuBootInfo *info);
 void efiemu_debug_string(const char *s);
 void efiemu_debug_hex(UINT64 value);
 

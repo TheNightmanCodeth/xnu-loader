@@ -37,6 +37,5 @@ extern FdtBoard g_board;
 // the build's defaults, used as-is when there is no fdt
 VOID fdt_board_defaults(VOID);
 BOOLEAN fdt_board_parse(CONST VOID *fdt);
-CONST VOID *fdt_board_find(EFI_SYSTEM_TABLE *st);
 
 #endif

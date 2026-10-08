@@ -3,19 +3,12 @@
 // next to the nodes the loader builds itself
 #include "devtree.h"
 #include "console.h"
+#include "fdt.h"
 
 #if defined(__riscv) || defined(__aarch64__)
 
-#define FDT_MAGIC 0xd00dfeedU
-#define FDT_BEGIN_NODE 1
-#define FDT_END_NODE 2
-#define FDT_PROP 3
-#define FDT_NOP 4
 #define FDT_MAX_DEPTH 16
 #define MAX_IRQ_CONTROLLERS 256
-
-static const EFI_GUID dtb_table_guid = { 0xb1b621d5, 0xf19c, 0x41a5,
-                                         { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
 
 typedef struct {
   DeviceTreeNode *node;
@@ -42,51 +35,9 @@ typedef struct {
 static IrqController irq_controllers[MAX_IRQ_CONTROLLERS];
 static UINT32 irq_controller_count;
 
-static UINT32 be32(const UINT8 *p) {
-  return (UINT32)p[0] << 24 | (UINT32)p[1] << 16 | (UINT32)p[2] << 8 | p[3];
-}
-
-static BOOLEAN str_eq(const CHAR8 *a, const CHAR8 *b) {
-  while (*a && *a == *b) {
-    ++a;
-    ++b;
-  }
-  return *a == *b;
-}
-
-static BOOLEAN str_prefix(const CHAR8 *s, const CHAR8 *prefix) {
-  while (*prefix && *s == *prefix) {
-    ++s;
-    ++prefix;
-  }
-  return *prefix == 0;
-}
-
 static BOOLEAN str_suffix(const CHAR8 *s, const CHAR8 *suffix) {
-  UINTN n = 0, m = 0;
-  while (s[n])
-    ++n;
-  while (suffix[m])
-    ++m;
-  return m <= n && str_eq(s + n - m, suffix);
-}
-
-static UINTN str_len(const CHAR8 *s) {
-  UINTN n = 0;
-  while (s[n])
-    ++n;
-  return n;
-}
-
-static const UINT8 *find_fdt(AppContext *ctx) {
-  for (UINTN i = 0; i < ctx->st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
-    if (!CompareMem(&e->VendorGuid, &dtb_table_guid, sizeof(EFI_GUID))) {
-      const UINT8 *h = (const UINT8 *)e->VendorTable;
-      return h && be32(h) == FDT_MAGIC ? h : NULL;
-    }
-  }
-  return NULL;
+  UINT32 n = fdt_str_len(s), m = fdt_str_len(suffix);
+  return m <= n && fdt_str_eq(s + n - m, suffix);
 }
 
 // dtc's guess: one or more non-empty printable strings, each nul terminated
@@ -110,15 +61,15 @@ static BOOLEAN looks_like_strings(const UINT8 *v, UINT32 len) {
 static UINT32 put_value(UINT8 *out, const UINT8 *cells, UINT32 n) {
   UINT32 o = 0;
   for (UINT32 i = 0; n >= 2 && i < n - 2; i++, o += 4) {
-    UINT32 c = be32(cells + 4 * i);
+    UINT32 c = fdt_be32(cells + 4 * i);
     CopyMem(out + o, &c, 4);
   }
   if (n == 1) {
-    UINT32 c = be32(cells);
+    UINT32 c = fdt_be32(cells);
     CopyMem(out + o, &c, 4);
     o += 4;
   } else if (n >= 2) {
-    UINT64 v = (UINT64)be32(cells + 4 * (n - 2)) << 32 | be32(cells + 4 * (n - 1));
+    UINT64 v = (UINT64)fdt_be32(cells + 4 * (n - 2)) << 32 | fdt_be32(cells + 4 * (n - 1));
     CopyMem(out + o, &v, 8);
     o += 8;
   }
@@ -145,7 +96,7 @@ static BOOLEAN put_tuples(UINT8 *out, const UINT8 *v, UINT32 len, const UINT32 *
 
 static void put_cells(UINT8 *out, const UINT8 *v, UINT32 len) {
   for (UINT32 i = 0; i + 4 <= len; i += 4) {
-    UINT32 c = be32(v + i);
+    UINT32 c = fdt_be32(v + i);
     CopyMem(out + i, &c, 4);
   }
 }
@@ -162,7 +113,7 @@ static void add_u32(AppContext *ctx, DeviceTreeNode *node, const CHAR8 *name, UI
 }
 
 static void add_str(AppContext *ctx, DeviceTreeNode *node, const CHAR8 *name, const CHAR8 *s) {
-  add_prop(ctx, node, name, s, (UINT32)str_len(s) + 1);
+  add_prop(ctx, node, name, s, (UINT32)fdt_str_len(s) + 1);
 }
 
 // one fdt property onto an apple node, in the kernel's byte order
@@ -172,7 +123,7 @@ static void import_prop(AppContext *ctx, FdtLevel *lv, const CHAR8 *name, const 
   UINT8 stack_buf[256];
   UINT8 *out = stack_buf;
 
-  if (str_eq(name, "name"))
+  if (fdt_str_eq(name, "name"))
     return;
   if (len == 0) {
     add_prop(ctx, node, name, NULL, 0);
@@ -183,10 +134,10 @@ static void import_prop(AppContext *ctx, FdtLevel *lv, const CHAR8 *name, const 
                                   (VOID **)&out)))
     return;
 
-  BOOLEAN numeric = str_eq(name, "reg") || str_eq(name, "ranges") ||
-                    str_eq(name, "dma-ranges") || str_eq(name, "phandle") ||
-                    str_eq(name, "linux,phandle") || str_eq(name, "interrupt-parent") ||
-                    str_eq(name, "interrupts") || str_eq(name, "interrupts-extended") ||
+  BOOLEAN numeric = fdt_str_eq(name, "reg") || fdt_str_eq(name, "ranges") ||
+                    fdt_str_eq(name, "dma-ranges") || fdt_str_eq(name, "phandle") ||
+                    fdt_str_eq(name, "linux,phandle") || fdt_str_eq(name, "interrupt-parent") ||
+                    fdt_str_eq(name, "interrupts") || fdt_str_eq(name, "interrupts-extended") ||
                     name[0] == '#';
   BOOLEAN done = FALSE;
 
@@ -196,17 +147,17 @@ static void import_prop(AppContext *ctx, FdtLevel *lv, const CHAR8 *name, const 
   } else if (len % 4 != 0) {
     CopyMem(out, v, len);
     done = TRUE;
-  } else if (str_eq(name, "reg")) {
+  } else if (fdt_str_eq(name, "reg")) {
     UINT32 f[2] = { lv->parent_addr_cells, lv->parent_size_cells };
     done = put_tuples(out, v, len, f, 2);
     if (done && lv->parent_addr_cells >= 1 && lv->parent_addr_cells <= 2) {
-      lv->reg = lv->parent_addr_cells == 2 ? (UINT64)be32(v) << 32 | be32(v + 4) : be32(v);
+      lv->reg = lv->parent_addr_cells == 2 ? (UINT64)fdt_be32(v) << 32 | fdt_be32(v + 4) : fdt_be32(v);
       lv->have_reg = TRUE;
     }
-  } else if (str_eq(name, "ranges") || str_eq(name, "dma-ranges")) {
+  } else if (fdt_str_eq(name, "ranges") || fdt_str_eq(name, "dma-ranges")) {
     UINT32 f[3] = { lv->addr_cells, lv->parent_addr_cells, lv->size_cells };
     done = put_tuples(out, v, len, f, 3);
-  } else if (len == 8 && (str_suffix(name, "-frequency") || str_prefix(name, "linux,initrd-"))) {
+  } else if (len == 8 && (str_suffix(name, "-frequency") || fdt_str_prefix(name, "linux,initrd-"))) {
     // a frequency or an address that needed two cells is one native u64
     put_value(out, v, 2);
     done = TRUE;
@@ -217,75 +168,63 @@ static void import_prop(AppContext *ctx, FdtLevel *lv, const CHAR8 *name, const 
   add_prop(ctx, node, name, out, len);
 
   // SecureDTFindNodeWithPhandle looks for apple's spelling
-  if (str_eq(name, "phandle"))
+  if (fdt_str_eq(name, "phandle"))
     add_prop(ctx, node, "AAPL,phandle", out, len);
   if (out != stack_buf)
     uefi_call_wrapper(ctx->bs->FreePool, 1, out);
 }
 
 // a node's properties all come before its children, so what the conversion needs is read ahead
-static void scan_node(const UINT8 *st, const CHAR8 *strings, FdtLevel *lv, UINT32 *phandle,
-                      UINT32 *icells) {
-  for (;;) {
-    UINT32 tok = be32(st);
-    if (tok == FDT_NOP) {
-      st += 4;
-      continue;
-    }
-    if (tok != FDT_PROP)
-      return;
-    UINT32 len = be32(st + 4);
-    const CHAR8 *pname = strings + be32(st + 8);
-    const UINT8 *v = st + 12;
-    if (len == 4 && str_eq(pname, "#address-cells")) {
-      lv->addr_cells = be32(v);
+static void scan_node(const FdtWalk *w, FdtLevel *lv, UINT32 *phandle, UINT32 *icells) {
+  FdtProp pr;
+  for (int more = fdt_prop_first(w, &pr); more; more = fdt_prop_next(w, &pr)) {
+    UINT32 len = pr.len;
+    const CHAR8 *pname = pr.prop;
+    const UINT8 *v = pr.value;
+    if (len == 4 && fdt_str_eq(pname, "#address-cells")) {
+      lv->addr_cells = fdt_be32(v);
       lv->has_addr_cells = TRUE;
-    } else if (len == 4 && str_eq(pname, "#size-cells")) {
-      lv->size_cells = be32(v);
+    } else if (len == 4 && fdt_str_eq(pname, "#size-cells")) {
+      lv->size_cells = fdt_be32(v);
       lv->has_size_cells = TRUE;
-    } else if (str_eq(pname, "ranges")) {
+    } else if (fdt_str_eq(pname, "ranges")) {
       lv->has_ranges = TRUE;
-    } else if (len >= 4 && str_eq(pname, "interrupt-parent")) {
-      lv->irq_parent = be32(v);
+    } else if (len >= 4 && fdt_str_eq(pname, "interrupt-parent")) {
+      lv->irq_parent = fdt_be32(v);
       lv->own_irq_parent = TRUE;
-    } else if (str_eq(pname, "interrupts-extended")) {
+    } else if (fdt_str_eq(pname, "interrupts-extended")) {
       lv->has_irq_ext = TRUE;
-    } else if (str_eq(pname, "interrupt-controller")) {
+    } else if (fdt_str_eq(pname, "interrupt-controller")) {
       lv->is_irq_controller = TRUE;
-    } else if (len == 4 && (str_eq(pname, "phandle") || str_eq(pname, "linux,phandle"))) {
-      *phandle = be32(v);
-    } else if (len == 4 && str_eq(pname, "#interrupt-cells")) {
-      *icells = be32(v);
-    } else if (str_eq(pname, "status") && looks_like_strings(v, len)) {
-      lv->disabled = !str_eq((const CHAR8 *)v, "okay") && !str_eq((const CHAR8 *)v, "ok");
-    } else if (str_eq(pname, "compatible") && looks_like_strings(v, len)) {
-      for (UINT32 o = 0; o < len; o += (UINT32)str_len((const CHAR8 *)v + o) + 1)
+    } else if (len == 4 && (fdt_str_eq(pname, "phandle") || fdt_str_eq(pname, "linux,phandle"))) {
+      *phandle = fdt_be32(v);
+    } else if (len == 4 && fdt_str_eq(pname, "#interrupt-cells")) {
+      *icells = fdt_be32(v);
+    } else if (fdt_str_eq(pname, "status") && looks_like_strings(v, len)) {
+      lv->disabled = !fdt_okay(v);
+    } else if (fdt_str_eq(pname, "compatible") && looks_like_strings(v, len)) {
+      for (UINT32 o = 0; o < len; o += fdt_str_len((const CHAR8 *)v + o) + 1)
         if (str_suffix((const CHAR8 *)v + o, "-pinctrl") || str_suffix((const CHAR8 *)v + o, "-pio"))
           lv->is_pinctrl = TRUE;
     }
-    st += 12 + ((len + 3) & ~3U);
   }
 }
 
-static void collect_irq_controllers(const UINT8 *st, const CHAR8 *strings) {
+static void collect_irq_controllers(const VOID *fdt) {
+  FdtWalk w;
+  int ev;
   irq_controller_count = 0;
-  for (;;) {
-    UINT32 tok = be32(st);
-    st += 4;
-    if (tok == FDT_BEGIN_NODE) {
-      st += (str_len((const CHAR8 *)st) + 4) & ~3UL;
-      FdtLevel scratch;
-      UINT32 phandle = 0, icells = ~0U;
-      SetMem(&scratch, sizeof(scratch), 0);
-      scan_node(st, strings, &scratch, &phandle, &icells);
-      if (phandle && icells != ~0U && irq_controller_count < MAX_IRQ_CONTROLLERS) {
-        irq_controllers[irq_controller_count].phandle = phandle;
-        irq_controllers[irq_controller_count++].cells = icells;
-      }
-    } else if (tok == FDT_PROP) {
-      st += 8 + ((be32(st) + 3) & ~3U);
-    } else if (tok != FDT_END_NODE && tok != FDT_NOP) {
-      return;
+  fdt_walk_init(&w, fdt);
+  while ((ev = fdt_walk_next(&w)) != FDT_EV_DONE) {
+    if (ev != FDT_EV_BEGIN)
+      continue;
+    FdtLevel scratch;
+    UINT32 phandle = 0, icells = ~0U;
+    SetMem(&scratch, sizeof(scratch), 0);
+    scan_node(&w, &scratch, &phandle, &icells);
+    if (phandle && icells != ~0U && irq_controller_count < MAX_IRQ_CONTROLLERS) {
+      irq_controllers[irq_controller_count].phandle = phandle;
+      irq_controllers[irq_controller_count++].cells = icells;
     }
   }
 }
@@ -314,12 +253,12 @@ static BOOLEAN split_interrupts_extended(AppContext *ctx, DeviceTreeNode *node, 
     return FALSE;
   specs = parents + ncells;
   for (UINT32 at = 0; at < ncells;) {
-    UINT32 phandle = be32(v + 4 * at), cells;
+    UINT32 phandle = fdt_be32(v + 4 * at), cells;
     if (!irq_controller_cells(phandle, &cells) || cells == 0 || at + 1 + cells > ncells)
       goto out;
     parents[nirq++] = phandle;
     for (UINT32 c = 0; c < cells; c++)
-      specs[nspec++] = be32(v + 4 * (at + 1 + c));
+      specs[nspec++] = fdt_be32(v + 4 * (at + 1 + c));
     at += 1 + cells;
   }
   BOOLEAN one_parent = TRUE;
@@ -337,8 +276,8 @@ out:
 static BOOLEAN node_is_cpu(DeviceTreeNode *node) {
   for (UINT32 i = 0; i < node->nProperties; i++) {
     DeviceTreeNodeProperty *p = node->properties[i];
-    if (str_eq(p->name, "device_type") && p->value && p->length >= 4 &&
-        str_eq((const CHAR8 *)p->value, "cpu"))
+    if (fdt_str_eq(p->name, "device_type") && p->value && p->length >= 4 &&
+        fdt_str_eq((const CHAR8 *)p->value, "cpu"))
       return TRUE;
   }
   return FALSE;
@@ -356,35 +295,31 @@ static BOOLEAN arm64_leave_out(UINT32 depth, const CHAR8 *name, FdtLevel *lv, Fd
   if (depth != 1)
     return FALSE;
   for (UINT32 i = 0; i < sizeof(own) / sizeof(own[0]); i++) {
-    if (str_eq(name, own[i]))
+    if (fdt_str_eq(name, own[i]))
       return TRUE;
   }
-  return str_prefix(name, "memory@");
+  return fdt_str_prefix(name, "memory@");
 }
 #endif
 
 EFI_STATUS dt_import_fdt(AppContext *ctx, DeviceTreeNode *root, DeviceTreeNode *chosen) {
-  const UINT8 *h = find_fdt(ctx);
-  if (!h) {
+  FdtWalk w;
+  if (!fdt_walk_init(&w, ctx->fdt)) {
     log_error(L"DT: no flattened device tree from firmware\r\n");
     return EFI_NOT_FOUND;
   }
 
-  const UINT8 *st = h + be32(h + 8);
-  const CHAR8 *strings = (const CHAR8 *)(h + be32(h + 12));
   FdtLevel levels[FDT_MAX_DEPTH];
-  UINT32 depth = 0;
   UINT32 nodes = 0, cpus = 0;
+  int ev;
 
-  collect_irq_controllers(st, strings);
+  collect_irq_controllers(ctx->fdt);
 
-  for (;;) {
-    UINT32 tok = be32(st);
-    st += 4;
-    if (tok == FDT_BEGIN_NODE) {
-      const CHAR8 *name = (const CHAR8 *)st;
-      UINTN len = str_len(name);
-      st += (len + 4) & ~3UL;
+  // levels[] is indexed from the root at 0
+  while ((ev = fdt_walk_next(&w)) != FDT_EV_DONE) {
+    UINT32 depth = w.depth - 1;
+    if (ev == FDT_EV_BEGIN) {
+      const CHAR8 *name = w.name;
       if (depth >= FDT_MAX_DEPTH) {
         log_error(L"DT: fdt nests deeper than %u\r\n", FDT_MAX_DEPTH);
         return EFI_UNSUPPORTED;
@@ -396,14 +331,14 @@ EFI_STATUS dt_import_fdt(AppContext *ctx, DeviceTreeNode *root, DeviceTreeNode *
       lv->addr_cells = 2;
       lv->size_cells = 1;
       UINT32 phandle = 0, icells = 0;
-      scan_node(st, strings, lv, &phandle, &icells);
+      scan_node(&w, lv, &phandle, &icells);
       lv->parent_addr_cells = up ? up->addr_cells : 2;
       lv->parent_size_cells = up ? up->size_cells : 1;
       if (!lv->own_irq_parent && up)
         lv->irq_parent = up->irq_parent;
       if (depth == 0) {
         lv->node = root;
-      } else if (up->skip || (depth == 1 && str_eq(name, "chosen"))) {
+      } else if (up->skip || (depth == 1 && fdt_str_eq(name, "chosen"))) {
         // /chosen is the loader's own, only stdout-path comes over
         lv->skip = TRUE;
 #if defined(__aarch64__)
@@ -425,57 +360,44 @@ EFI_STATUS dt_import_fdt(AppContext *ctx, DeviceTreeNode *root, DeviceTreeNode *
         if (!lv->has_size_cells)
           add_u32(ctx, lv->node, "#size-cells", lv->size_cells);
       }
-      depth++;
-    } else if (tok == FDT_END_NODE) {
-      if (depth == 0)
-        break;
+    } else if (ev == FDT_EV_END) {
 #if defined(__riscv)
-      FdtLevel *lv = &levels[depth - 1];
+      FdtLevel *lv = &levels[depth];
       // the kernel takes the cpu marked running as the boot hart
       if (lv->node && lv->node != root && lv->have_reg && node_is_cpu(lv->node)) {
         add_str(ctx, lv->node, "state", lv->reg == ctx->boot_hartid ? "running" : "waiting");
         cpus++;
       }
 #endif
-      depth--;
-      if (depth == 0)
-        break;
-    } else if (tok == FDT_PROP) {
-      UINT32 len = be32(st);
-      const CHAR8 *pname = strings + be32(st + 4);
-      const UINT8 *v = st + 8;
-      st += 8 + ((len + 3) & ~3U);
-      if (depth == 0)
-        continue;
-      FdtLevel *lv = &levels[depth - 1];
+    } else if (ev == FDT_EV_PROP) {
+      const CHAR8 *pname = w.prop;
+      const UINT8 *v = w.value;
+      UINT32 len = w.len;
+      FdtLevel *lv = &levels[depth];
       if (lv->skip) {
-        if (depth == 2 && chosen && str_eq(pname, "stdout-path") && looks_like_strings(v, len))
+        if (w.depth == 2 && chosen && fdt_str_eq(pname, "stdout-path") && looks_like_strings(v, len))
           add_prop(ctx, chosen, "stdout-path", v, len);
         continue;
       }
 #if defined(__aarch64__)
       // the root keeps the loader's compatible and model, the platform expert matches on them
-      if (depth == 1 && (str_eq(pname, "compatible") || str_eq(pname, "model")))
+      if (w.depth == 1 && (fdt_str_eq(pname, "compatible") || fdt_str_eq(pname, "model")))
         continue;
 #endif
       // a device's interrupts-extended outranks its interrupts and interrupt-parent
       BOOLEAN split = lv->has_irq_ext && !lv->is_irq_controller;
-      if (split && str_eq(pname, "interrupts-extended") &&
+      if (split && fdt_str_eq(pname, "interrupts-extended") &&
           split_interrupts_extended(ctx, lv->node, v, len))
         continue;
-      if (split && (str_eq(pname, "interrupts") || str_eq(pname, "interrupt-parent")))
+      if (split && (fdt_str_eq(pname, "interrupts") || fdt_str_eq(pname, "interrupt-parent")))
         continue;
       import_prop(ctx, lv, pname, v, len);
       // an inherited interrupt-parent is written onto the device itself
-      if (str_eq(pname, "interrupts") && !lv->own_irq_parent && lv->irq_parent &&
+      if (fdt_str_eq(pname, "interrupts") && !lv->own_irq_parent && lv->irq_parent &&
           !lv->added_irq_parent) {
         add_prop(ctx, lv->node, "interrupt-parent", &lv->irq_parent, sizeof(lv->irq_parent));
         lv->added_irq_parent = TRUE;
       }
-    } else if (tok == FDT_NOP) {
-      continue;
-    } else {
-      break;
     }
   }
 
@@ -490,30 +412,19 @@ EFI_STATUS dt_import_fdt(AppContext *ctx, DeviceTreeNode *root, DeviceTreeNode *
 }
 
 BOOLEAN dt_riscv_fdt_is_qemu(AppContext *ctx) {
-  const UINT8 *h = find_fdt(ctx);
-  if (!h)
+  FdtWalk w;
+  FdtProp pr;
+  if (!fdt_walk_init(&w, ctx->fdt) || fdt_walk_next(&w) != FDT_EV_BEGIN)
     return FALSE;
-  const UINT8 *st = h + be32(h + 8);
-  const CHAR8 *strings = (const CHAR8 *)(h + be32(h + 12));
   // the root's compatible is among its first properties
-  if (be32(st) != FDT_BEGIN_NODE)
-    return FALSE;
-  st += 8;
-  while (be32(st) == FDT_PROP || be32(st) == FDT_NOP) {
-    if (be32(st) == FDT_NOP) {
-      st += 4;
+  for (int more = fdt_prop_first(&w, &pr); more; more = fdt_prop_next(&w, &pr)) {
+    if (!fdt_str_eq(pr.prop, "compatible"))
       continue;
-    }
-    UINT32 len = be32(st + 4);
-    const CHAR8 *pname = strings + be32(st + 8);
-    const CHAR8 *v = (const CHAR8 *)(st + 12);
-    if (str_eq(pname, "compatible")) {
-      for (UINT32 o = 0; o < len; o += (UINT32)str_len(v + o) + 1)
-        if (str_prefix(v + o, "riscv-virtio") || str_prefix(v + o, "qemu,"))
-          return TRUE;
-      return FALSE;
-    }
-    st += 12 + ((len + 3) & ~3U);
+    const CHAR8 *v = (const CHAR8 *)pr.value;
+    for (UINT32 o = 0; o < pr.len; o += fdt_str_len(v + o) + 1)
+      if (fdt_str_prefix(v + o, "riscv-virtio") || fdt_str_prefix(v + o, "qemu,"))
+        return TRUE;
+    return FALSE;
   }
   return FALSE;
 }

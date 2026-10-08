@@ -120,6 +120,8 @@ typedef struct AppContext {
   /* Page-rounded RAMDisk retained through ExitBootServices. */
   EFI_PHYSICAL_ADDRESS ramdisk_phys;
   UINT64 ramdisk_size;
+  /* The firmware's flattened device tree, NULL when it hands over none (ACPI). */
+  CONST VOID *fdt;
 #if defined(__aarch64__)
   /* Release XNU expects the trust-cache EXTRADATA range below the KC. */
   EFI_PHYSICAL_ADDRESS trustcache_phys;

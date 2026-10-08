@@ -2,15 +2,10 @@
 // the console UART and the GIC, so one arm64 build runs on any board with a sane DTB.
 // Runs before the MMU is on in the Linux Image path, so every read is bytewise.
 #include "fdt_board.h"
+#include "fdt.h"
 #include "platform.h"
 
 #if defined(__aarch64__) && defined(XNU_LOADER_PLATFORM_GENERIC)
-
-#define FDT_MAGIC   0xd00dfeedU
-#define TOK_BEGIN   1
-#define TOK_END     2
-#define TOK_PROP    3
-#define TOK_NOP     4
 
 #define MAX_DEPTH   16
 #define PATH_LEN    256
@@ -18,46 +13,11 @@
 
 FdtBoard g_board;
 
-static UINT32 be32(CONST UINT8 *p) {
-  return (UINT32)p[0] << 24 | (UINT32)p[1] << 16 | (UINT32)p[2] << 8 | p[3];
-}
-
-static UINT64 cells(CONST UINT8 *p, UINT32 n) {
-  UINT64 v = 0;
-  for (UINT32 i = 0; i < n; ++i)
-    v = v << 32 | be32(p + 4 * i);
-  return v;
-}
-
 // no library calls: this runs before the MMU and caches are on
 static VOID mem_zero(VOID *p, UINTN n) {
   volatile UINT8 *b = (volatile UINT8 *)p;
   for (UINTN i = 0; i < n; ++i)
     b[i] = 0;
-}
-
-static BOOLEAN mem_eq(CONST VOID *a, CONST VOID *b, UINTN n) {
-  CONST UINT8 *x = (CONST UINT8 *)a, *y = (CONST UINT8 *)b;
-  for (UINTN i = 0; i < n; ++i) {
-    if (x[i] != y[i])
-      return FALSE;
-  }
-  return TRUE;
-}
-
-static UINTN str_len(CONST CHAR8 *s) {
-  UINTN n = 0;
-  while (s[n])
-    ++n;
-  return n;
-}
-
-static BOOLEAN str_eq(CONST CHAR8 *a, CONST CHAR8 *b) {
-  while (*a && *a == *b) {
-    ++a;
-    ++b;
-  }
-  return *a == *b;
 }
 
 // a == b up to n bytes of a, with b ending there
@@ -67,25 +27,6 @@ static BOOLEAN str_eq_n(CONST CHAR8 *a, UINTN n, CONST CHAR8 *b) {
       return FALSE;
   }
   return b[n] == 0;
-}
-
-static BOOLEAN str_prefix(CONST CHAR8 *s, CONST CHAR8 *prefix) {
-  while (*prefix) {
-    if (*s++ != *prefix++)
-      return FALSE;
-  }
-  return TRUE;
-}
-
-// true when the nul-separated compatible list names want
-static BOOLEAN compat_has(CONST CHAR8 *list, UINT32 len, CONST CHAR8 *want) {
-  UINT32 i = 0;
-  while (i < len) {
-    if (str_eq(list + i, want))
-      return TRUE;
-    i += (UINT32)str_len(list + i) + 1;
-  }
-  return FALSE;
 }
 
 VOID fdt_board_defaults(VOID) {
@@ -182,11 +123,6 @@ typedef struct {
   UINT32 shift, width, clock, speed;
 } Level;
 
-typedef struct {
-  CONST UINT8 *st;
-  CONST CHAR8 *strings;
-} Fdt;
-
 // the console the firmware means: stdout-path, then console= on the command line, then serial0
 typedef struct {
   CONST CHAR8 *stdout_path;
@@ -202,62 +138,48 @@ typedef struct {
   UINT32 psci;
 } Prescan;
 
-static VOID prescan(Fdt *f, Prescan *p) {
-  CONST UINT8 *st = f->st;
-  UINT32 depth = 0;
+static VOID prescan(CONST VOID *blob, Prescan *p) {
+  FdtWalk w;
   enum { N_OTHER, N_CHOSEN, N_ALIASES, N_MEMORY, N_PSCI } kind = N_OTHER;
+  int ev;
 
   p->root_addr = 2;
   p->root_size = 1;
-  for (;;) {
-    UINT32 tok = be32(st);
-    st += 4;
-    if (tok == TOK_BEGIN) {
-      CONST CHAR8 *name = (CONST CHAR8 *)st;
-      st += (str_len(name) + 4) & ~3UL;
-      ++depth;
-      if (depth == 2) {
-        kind = str_eq(name, "chosen") ? N_CHOSEN
-               : str_eq(name, "aliases") ? N_ALIASES
-               : (str_eq(name, "memory") || str_prefix(name, "memory@")) ? N_MEMORY
-               : str_eq(name, "psci") ? N_PSCI
-               : N_OTHER;
-      }
-    } else if (tok == TOK_END) {
-      if (depth == 2)
-        kind = N_OTHER;
-      if (depth-- == 0)
-        break;
-    } else if (tok == TOK_PROP) {
-      UINT32 len = be32(st);
-      CONST CHAR8 *pname = f->strings + be32(st + 4);
-      CONST UINT8 *v = st + 8;
-      st += 8 + ((len + 3) & ~3U);
-      if (depth == 1 && str_eq(pname, "#address-cells"))
-        p->root_addr = be32(v);
-      else if (depth == 1 && str_eq(pname, "#size-cells"))
-        p->root_size = be32(v);
-      else if (depth == 1 && str_eq(pname, "compatible"))
-        g_board.is_qemu_virt = compat_has((CONST CHAR8 *)v, len, "linux,dummy-virt");
-      else if (depth == 2 && kind == N_CHOSEN && str_eq(pname, "stdout-path")) {
+  fdt_walk_init(&w, blob);
+  while ((ev = fdt_walk_next(&w)) != FDT_EV_DONE) {
+    if (ev == FDT_EV_BEGIN && w.depth == 2) {
+      kind = fdt_str_eq(w.name, "chosen") ? N_CHOSEN
+             : fdt_str_eq(w.name, "aliases") ? N_ALIASES
+             : fdt_name_is(w.name, "memory") ? N_MEMORY
+             : fdt_str_eq(w.name, "psci") ? N_PSCI
+             : N_OTHER;
+    } else if (ev == FDT_EV_END && w.depth == 2) {
+      kind = N_OTHER;
+    } else if (ev == FDT_EV_PROP) {
+      CONST CHAR8 *pname = w.prop;
+      CONST UINT8 *v = w.value;
+      UINT32 len = w.len;
+      if (w.depth == 1 && fdt_str_eq(pname, "#address-cells"))
+        p->root_addr = fdt_be32(v);
+      else if (w.depth == 1 && fdt_str_eq(pname, "#size-cells"))
+        p->root_size = fdt_be32(v);
+      else if (w.depth == 1 && fdt_str_eq(pname, "compatible"))
+        g_board.is_qemu_virt = fdt_list_has(v, len, "linux,dummy-virt");
+      else if (w.depth == 2 && kind == N_CHOSEN && fdt_str_eq(pname, "stdout-path")) {
         p->stdout_path = (CONST CHAR8 *)v;
         p->stdout_len = len;
-      } else if (depth == 2 && kind == N_CHOSEN && str_eq(pname, "bootargs")) {
+      } else if (w.depth == 2 && kind == N_CHOSEN && fdt_str_eq(pname, "bootargs")) {
         p->bootargs = (CONST CHAR8 *)v;
         p->bootargs_len = len;
-      } else if (depth == 2 && kind == N_ALIASES && p->naliases < MAX_ALIASES) {
+      } else if (w.depth == 2 && kind == N_ALIASES && p->naliases < MAX_ALIASES) {
         p->alias_name[p->naliases] = pname;
         p->alias_path[p->naliases++] = (CONST CHAR8 *)v;
-      } else if (depth == 2 && kind == N_PSCI && str_eq(pname, "method")) {
-        p->psci = str_eq((CONST CHAR8 *)v, "hvc") ? 1 : str_eq((CONST CHAR8 *)v, "smc") ? 2 : 0;
-      } else if (depth == 2 && kind == N_MEMORY && str_eq(pname, "reg") && !p->mem_reg) {
+      } else if (w.depth == 2 && kind == N_PSCI && fdt_str_eq(pname, "method")) {
+        p->psci = fdt_str_eq((CONST CHAR8 *)v, "hvc") ? 1 : fdt_str_eq((CONST CHAR8 *)v, "smc") ? 2 : 0;
+      } else if (w.depth == 2 && kind == N_MEMORY && fdt_str_eq(pname, "reg") && !p->mem_reg) {
         p->mem_reg = v;
         p->mem_len = len;
       }
-    } else if (tok == TOK_NOP) {
-      continue;
-    } else {
-      break;
     }
   }
 }
@@ -297,9 +219,9 @@ static CONST CHAR8 *console_path(Prescan *p, UINT32 *baud) {
     CONST CHAR8 *s = p->bootargs, *end = p->bootargs + p->bootargs_len;
     while (s < end && *s) {
       CONST CHAR8 *tty = NULL;
-      if (str_prefix(s, "console=ttyS"))
+      if (fdt_str_prefix(s, "console=ttyS"))
         tty = s + 12;
-      else if (str_prefix(s, "console=ttyAMA"))
+      else if (fdt_str_prefix(s, "console=ttyAMA"))
         tty = s + 14;
       if (tty && *tty >= '0' && *tty <= '9') {
         CHAR8 name[16] = { 's', 'e', 'r', 'i', 'a', 'l' };
@@ -336,9 +258,9 @@ static BOOLEAN translate(Level *lv, UINT32 depth, UINT64 *addr) {
     UINT32 stride = 4 * (child + up + size);
     BOOLEAN hit = FALSE;
     for (UINT32 o = 0; o + stride <= bus->ranges_len; o += stride) {
-      UINT64 cb = cells(bus->ranges + o, child);
-      UINT64 pb = cells(bus->ranges + o + 4 * child, up);
-      UINT64 sz = cells(bus->ranges + o + 4 * (child + up), size);
+      UINT64 cb = fdt_cells(bus->ranges + o, child);
+      UINT64 pb = fdt_cells(bus->ranges + o + 4 * child, up);
+      UINT64 sz = fdt_cells(bus->ranges + o + 4 * (child + up), size);
       if (*addr >= cb && *addr - cb < sz) {
         *addr = *addr - cb + pb;
         hit = TRUE;
@@ -359,8 +281,8 @@ static BOOLEAN node_reg(Level *lv, UINT32 depth, UINT32 index, UINT64 *base, UIN
 
   if (!node->reg || off + 4 * (ac + sc) > node->reg_len)
     return FALSE;
-  *base = cells(node->reg + off, ac);
-  *size = sc ? cells(node->reg + off + 4 * ac, sc) : 0;
+  *base = fdt_cells(node->reg + off, ac);
+  *size = sc ? fdt_cells(node->reg + off + 4 * ac, sc) : 0;
   return translate(lv, depth, base);
 }
 
@@ -385,12 +307,12 @@ static VOID node_done(Level *lv, UINT32 depth, CONST CHAR8 *path, CONST CHAR8 *c
   if (node->disabled || !node->compat)
     return;
 
-  if (compat_has(node->compat, node->compat_len, "pci-host-ecam-generic"))
+  if (fdt_list_has(node->compat, node->compat_len, "pci-host-ecam-generic"))
     g_board.has_pci_ecam = TRUE;
 
   if (!*have_uart && console && path_is(path, node->path_len, console)) {
     for (UINT32 i = 0; i < sizeof(uart_table) / sizeof(uart_table[0]); ++i) {
-      if (!compat_has(node->compat, node->compat_len, uart_table[i].compat))
+      if (!fdt_list_has(node->compat, node->compat_len, uart_table[i].compat))
         continue;
       if (!node_reg(lv, depth, 0, &base, &size))
         break;
@@ -410,9 +332,9 @@ static VOID node_done(Level *lv, UINT32 depth, CONST CHAR8 *path, CONST CHAR8 *c
   if (!*have_gic) {
     UINT32 version = 0;
     for (UINT32 i = 0; i < sizeof(gic3_compat) / sizeof(gic3_compat[0]); ++i)
-      version = compat_has(node->compat, node->compat_len, gic3_compat[i]) ? 3 : version;
+      version = fdt_list_has(node->compat, node->compat_len, gic3_compat[i]) ? 3 : version;
     for (UINT32 i = 0; i < sizeof(gic2_compat) / sizeof(gic2_compat[0]); ++i)
-      version = compat_has(node->compat, node->compat_len, gic2_compat[i]) ? 2 : version;
+      version = fdt_list_has(node->compat, node->compat_len, gic2_compat[i]) ? 2 : version;
     if (version && node_reg(lv, depth, 0, &g_board.gicd_base, &g_board.gicd_size) &&
         node_reg(lv, depth, 1, &g_board.gic2_base, &g_board.gic2_size)) {
       g_board.gic_version = version;
@@ -422,23 +344,20 @@ static VOID node_done(Level *lv, UINT32 depth, CONST CHAR8 *path, CONST CHAR8 *c
 }
 
 BOOLEAN fdt_board_parse(CONST VOID *blob) {
-  CONST UINT8 *h = (CONST UINT8 *)blob;
-  Fdt f;
+  FdtWalk w;
   Prescan p;
   Level lv[MAX_DEPTH];
   CHAR8 path[PATH_LEN];
   UINT32 baud = 0;
-  INT32 depth = -1;
   BOOLEAN have_uart = FALSE, have_gic = FALSE;
+  int ev;
 
   fdt_board_defaults();
-  if (!h || be32(h) != FDT_MAGIC)
+  if (!fdt_walk_init(&w, blob))
     return FALSE;
 
-  f.st = h + be32(h + 8);
-  f.strings = (CONST CHAR8 *)(h + be32(h + 12));
   mem_zero(&p, sizeof(p));
-  prescan(&f, &p);
+  prescan(blob, &p);
 
   // a board with a tree is described by it alone, not by the build's defaults
   BOOLEAN virt = g_board.is_qemu_virt;
@@ -456,7 +375,7 @@ BOOLEAN fdt_board_parse(CONST VOID *blob) {
     UINT32 stride = 4 * (p.root_addr + p.root_size);
     UINT64 lowest = ~0ULL;
     for (UINT32 o = 0; o + stride <= p.mem_len; o += stride) {
-      UINT64 b = cells(p.mem_reg + o, p.root_addr);
+      UINT64 b = fdt_cells(p.mem_reg + o, p.root_addr);
       if (b < lowest)
         lowest = b;
     }
@@ -468,17 +387,14 @@ BOOLEAN fdt_board_parse(CONST VOID *blob) {
   if (baud)
     g_board.uart_baud = baud;
 
-  CONST UINT8 *st = f.st;
-  for (;;) {
-    UINT32 tok = be32(st);
-    st += 4;
-    if (tok == TOK_BEGIN) {
-      CONST CHAR8 *name = (CONST CHAR8 *)st;
-      UINTN n = str_len(name);
-      st += (n + 4) & ~3UL;
-      if (++depth >= MAX_DEPTH)
-        break;
+  // lv[] is indexed from the root at 0
+  while ((ev = fdt_walk_next(&w)) != FDT_EV_DONE) {
+    UINT32 depth = w.depth - 1;
+    if (depth >= MAX_DEPTH)
+      break;
+    if (ev == FDT_EV_BEGIN) {
       Level *l = &lv[depth];
+      UINTN n = fdt_str_len(w.name);
       mem_zero(l, sizeof(*l));
       l->addr_cells = 2;
       l->size_cells = 1;
@@ -490,55 +406,44 @@ BOOLEAN fdt_board_parse(CONST VOID *blob) {
         if (at > 1 && at < PATH_LEN - 1)
           path[at++] = '/';
         for (UINTN i = 0; i < n && at < PATH_LEN - 1; ++i)
-          path[at++] = name[i];
+          path[at++] = w.name[i];
         l->path_len = at;
       }
-    } else if (tok == TOK_END) {
-      if (depth < 0)
-        break;
+    } else if (ev == FDT_EV_END) {
       if (depth >= 1)
-        node_done(lv, (UINT32)depth, path, console, &have_uart, &have_gic);
-      if (--depth < 0)
-        break;
-    } else if (tok == TOK_PROP) {
-      UINT32 len = be32(st);
-      CONST CHAR8 *pname = f.strings + be32(st + 4);
-      CONST UINT8 *v = st + 8;
+        node_done(lv, depth, path, console, &have_uart, &have_gic);
+    } else if (ev == FDT_EV_PROP) {
+      CONST CHAR8 *pname = w.prop;
+      CONST UINT8 *v = w.value;
+      UINT32 len = w.len;
       Level *l = &lv[depth];
-      st += 8 + ((len + 3) & ~3U);
-      if (depth < 0)
-        break;
-      if (str_eq(pname, "#address-cells"))
-        l->addr_cells = be32(v);
-      else if (str_eq(pname, "#size-cells"))
-        l->size_cells = be32(v);
-      else if (str_eq(pname, "ranges")) {
+      if (fdt_str_eq(pname, "#address-cells"))
+        l->addr_cells = fdt_be32(v);
+      else if (fdt_str_eq(pname, "#size-cells"))
+        l->size_cells = fdt_be32(v);
+      else if (fdt_str_eq(pname, "ranges")) {
         l->has_ranges = TRUE;
         l->ranges = v;
         l->ranges_len = len;
-      } else if (str_eq(pname, "reg")) {
+      } else if (fdt_str_eq(pname, "reg")) {
         l->reg = v;
         l->reg_len = len;
-      } else if (str_eq(pname, "compatible")) {
+      } else if (fdt_str_eq(pname, "compatible")) {
         l->compat = (CONST CHAR8 *)v;
         l->compat_len = len;
-      } else if (str_eq(pname, "status")) {
-        l->disabled = !str_eq((CONST CHAR8 *)v, "okay") && !str_eq((CONST CHAR8 *)v, "ok");
-      } else if (str_eq(pname, "reg-shift") && len == 4) {
+      } else if (fdt_str_eq(pname, "status")) {
+        l->disabled = !fdt_okay(v);
+      } else if (fdt_str_eq(pname, "reg-shift") && len == 4) {
         l->has_shift = TRUE;
-        l->shift = be32(v);
-      } else if (str_eq(pname, "reg-io-width") && len == 4) {
+        l->shift = fdt_be32(v);
+      } else if (fdt_str_eq(pname, "reg-io-width") && len == 4) {
         l->has_width = TRUE;
-        l->width = be32(v);
-      } else if (str_eq(pname, "clock-frequency") && len == 4) {
-        l->clock = be32(v);
-      } else if (str_eq(pname, "current-speed") && len == 4) {
-        l->speed = be32(v);
+        l->width = fdt_be32(v);
+      } else if (fdt_str_eq(pname, "clock-frequency") && len == 4) {
+        l->clock = fdt_be32(v);
+      } else if (fdt_str_eq(pname, "current-speed") && len == 4) {
+        l->speed = fdt_be32(v);
       }
-    } else if (tok == TOK_NOP) {
-      continue;
-    } else {
-      break;
     }
   }
 
@@ -561,19 +466,6 @@ BOOLEAN fdt_board_parse(CONST VOID *blob) {
     }
   }
   return TRUE;
-}
-
-CONST VOID *fdt_board_find(EFI_SYSTEM_TABLE *st) {
-  static EFI_GUID dtb_guid = { 0xb1b621d5, 0xf19c, 0x41a5, { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
-
-  if (!st)
-    return NULL;
-  for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &st->ConfigurationTable[i];
-    if (mem_eq(&e->VendorGuid, &dtb_guid, sizeof(EFI_GUID)))
-      return e->VendorTable;
-  }
-  return NULL;
 }
 
 #endif

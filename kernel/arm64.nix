@@ -42,7 +42,9 @@ stdenv.mkDerivation {
     # Runs with the MMU off, where unaligned accesses fault
     $CC -c kernel/arm64.c -o build/kernel-arm64.c.o $common -mstrict-align $defines $includes
     $CC -c src/fdt_board.c -o build/src-fdt_board.c.o $common -mstrict-align $defines $includes
-    objects="$objects build/kernel-arm64.c.o build/src-fdt_board.c.o"
+    $CC -c src/fdt.c -o build/src-fdt.c.o $common -mstrict-align $defines $includes
+    $CC -c kernel/fdt_boot.c -o build/kernel-fdt_boot.c.o $common -mstrict-align $defines $includes
+    objects="$objects build/kernel-arm64.c.o build/src-fdt_board.c.o build/src-fdt.c.o build/kernel-fdt_boot.c.o"
     for source in kernel/cpio.c efi-emulation/exceptions.c efi-emulation/firmware.c \
       efi-emulation/modfs.c efi-emulation/storage.c \
       src/main.c src/app.c src/boot.c src/console.c src/devtree.c src/devtree-fdt.c src/fileio.c \

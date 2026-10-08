@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
+#include "fdt.h"
 
 void boot32_jump(uint32_t entry, uint32_t boot_args) __attribute__((noreturn));
 
@@ -192,13 +193,6 @@ static int strhas(const char *s, const char *w) {
   }
   return 0;
 }
-static int nameis(const char *name, const char *want) {
-  while (*want && *name == *want) {
-    ++name;
-    ++want;
-  }
-  return !*want && (!*name || *name == '@');
-}
 // framebuffer, framebuffer@addr, or u-boot's sunxi framebuffer-lcd0-hdmi and kin
 static int fbname(const char *name) {
   const char *w = "framebuffer";
@@ -207,15 +201,6 @@ static int fbname(const char *name) {
     ++w;
   }
   return !*w && (!*name || *name == '@' || *name == '-');
-}
-static uint32_t be32(const uint8_t *p) {
-  return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
-}
-static uint64_t cells(const uint8_t *p, uint32_t n) {
-  uint64_t v = 0;
-  for (uint32_t i = 0; i < n; ++i)
-    v = v << 32 | be32(p + 4 * i);
-  return v;
 }
 static uint32_t rd32(const uint8_t *p) {
   return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -233,36 +218,34 @@ static uint32_t cpu_reg[MAX_FDT_CPUS], ncpus;
 static uint32_t fb_base, fb_width, fb_height, fb_stride, fb_bpp;
 
 static void parse_fdt(const uint8_t *h) {
-  const uint8_t *st = h + be32(h + 8);
-  const char *strings = (const char *)(h + be32(h + 12));
-  uint32_t ac = 2, sc = 1, depth = 0;
+  FdtWalk w;
+  uint32_t ac = 2, sc = 1;
   enum { OTHER, MEMORY, CHOSEN, CPUS } kind = OTHER;
-  int in_cpu = 0;
+  int in_cpu = 0, ev;
   // a framebuffer node at any depth: gather its props, keep it once it ends okay
   uint32_t fb_depth = 0, f_simple = 0, f_okay = 0, f_base = 0;
   uint32_t f_w = 0, f_h = 0, f_stride = 0, f_bpp = 0;
   // the #address-cells each node gives its children, which a framebuffer's reg is read with
   uint32_t acs[8] = { 2 };
 
-  for (;;) {
-    uint32_t tok = be32(st);
-    st += 4;
-    if (tok == 1) {
-      const char *name = (const char *)st;
-      st += (strlen(name) + 4) & ~3u;
-      if (++depth < 8)
+  fdt_walk_init(&w, h);
+  while ((ev = fdt_walk_next(&w)) != FDT_EV_DONE) {
+    uint32_t depth = w.depth;
+    if (ev == FDT_EV_BEGIN) {
+      const char *name = w.name;
+      if (depth < 8)
         acs[depth] = 2;
       if (depth == 2)
-        kind = nameis(name, "memory") ? MEMORY : nameis(name, "chosen") ? CHOSEN :
-               nameis(name, "cpus") ? CPUS : OTHER;
+        kind = fdt_name_is(name, "memory") ? MEMORY : fdt_name_is(name, "chosen") ? CHOSEN :
+               fdt_name_is(name, "cpus") ? CPUS : OTHER;
       else if (depth == 3 && kind == CPUS)
-        in_cpu = nameis(name, "cpu");
+        in_cpu = fdt_name_is(name, "cpu");
       if (!fb_depth && fbname(name)) {
         fb_depth = depth;
         f_simple = f_base = f_w = f_h = f_stride = f_bpp = 0;
         f_okay = 1;
       }
-    } else if (tok == 2) {
+    } else if (ev == FDT_EV_END) {
       if (fb_depth && depth == fb_depth) {
         fb_depth = 0;
         if (!fb_base && f_simple && f_okay && f_base && f_w && f_h && f_stride && f_bpp) {
@@ -275,26 +258,25 @@ static void parse_fdt(const uint8_t *h) {
       }
       if (depth == 3)
         in_cpu = 0;
-      if (depth-- == 2)
+      if (depth == 2)
         kind = OTHER;
-    } else if (tok == 3) {
-      uint32_t len = be32(st);
-      const char *pn = strings + be32(st + 4);
-      const uint8_t *v = st + 8;
-      st += 8 + ((len + 3) & ~3u);
+    } else {
+      uint32_t len = w.len;
+      const char *pn = w.prop;
+      const uint8_t *v = w.value;
       if (fb_depth && depth == fb_depth) {
         if (streq(pn, "compatible"))
           f_simple = strhas((const char *)v, "simple-framebuffer");
         else if (streq(pn, "status"))
-          f_okay = streq((const char *)v, "okay") || streq((const char *)v, "ok");
+          f_okay = fdt_okay(v);
         else if (streq(pn, "reg") && fb_depth < 9 && len >= 4 * acs[fb_depth - 1])
-          f_base = (uint32_t)cells(v, acs[fb_depth - 1]);
+          f_base = (uint32_t)fdt_cells(v, acs[fb_depth - 1]);
         else if (streq(pn, "width"))
-          f_w = be32(v);
+          f_w = fdt_be32(v);
         else if (streq(pn, "height"))
-          f_h = be32(v);
+          f_h = fdt_be32(v);
         else if (streq(pn, "stride"))
-          f_stride = be32(v);
+          f_stride = fdt_be32(v);
         else if (streq(pn, "format"))
           // the kernel draws 32-bit xrgb only
           f_bpp = streq((const char *)v, "x8r8g8b8") || streq((const char *)v, "a8r8g8b8") ? 32 : 0;
@@ -310,16 +292,16 @@ static void parse_fdt(const uint8_t *h) {
 #endif
         }
       } else if (depth < 8 && streq(pn, "#address-cells")) {
-        acs[depth] = be32(v);
+        acs[depth] = fdt_be32(v);
         if (depth == 1)
           ac = acs[1];
       } else if (depth == 1 && streq(pn, "#size-cells")) {
-        sc = be32(v);
+        sc = fdt_be32(v);
       } else if (depth == 2 && kind == MEMORY && streq(pn, "reg") && !ram_size) {
-        ram_base = (uint32_t)cells(v, ac);
-        ram_size = (uint32_t)cells(v + 4 * ac, sc);
+        ram_base = (uint32_t)fdt_cells(v, ac);
+        ram_size = (uint32_t)fdt_cells(v + 4 * ac, sc);
       } else if (depth == 3 && in_cpu && streq(pn, "reg") && len >= 4 && ncpus < MAX_FDT_CPUS) {
-        cpu_reg[ncpus++] = be32(v + len - 4);
+        cpu_reg[ncpus++] = fdt_be32(v + len - 4);
       } else if (depth == 2 && kind == CHOSEN && streq(pn, "bootargs")) {
         uint32_t n = len < sizeof(cmdline) ? len : sizeof(cmdline) - 1;
         memcpy(cmdline, v, n);
@@ -329,14 +311,10 @@ static void parse_fdt(const uint8_t *h) {
         fdt_seed = v;
         fdt_seed_len = len;
       } else if (depth == 2 && kind == CHOSEN && streq(pn, "linux,initrd-start")) {
-        initrd_start = (uint32_t)cells(v, len / 4);
+        initrd_start = (uint32_t)fdt_cells(v, len / 4);
       } else if (depth == 2 && kind == CHOSEN && streq(pn, "linux,initrd-end")) {
-        initrd_end = (uint32_t)cells(v, len / 4);
+        initrd_end = (uint32_t)fdt_cells(v, len / 4);
       }
-    } else if (tok == 4) {
-      continue;
-    } else {
-      break;
     }
   }
 }
@@ -486,7 +464,7 @@ void boot32_main(uint32_t fdt, uint32_t argc, char **argv) {
       uint32_t v = parse_hex(argv[i]);
 
       puts("boot32: argv["); puthex(i); puts("] = "); puts(argv[i]); puts("\n");
-      if (fdt == 0 && v != 0 && v < go_ram_top && (v & 3) == 0 && be32((const uint8_t *)v) == 0xd00dfeed) {
+      if (fdt == 0 && v != 0 && v < go_ram_top && (v & 3) == 0 && fdt_check((const void *)v)) {
         fdt = v;
       } else if (nplain == 0) {
         go_initrd = v;
@@ -501,8 +479,8 @@ void boot32_main(uint32_t fdt, uint32_t argc, char **argv) {
     for (i = go_ram_top - 0x01000000; fdt == 0 && i < go_ram_top; i += 8) {
       const uint8_t *h = (const uint8_t *)i;
 
-      if (be32(h) == 0xd00dfeed && be32(h + 4) >= 0x40 && be32(h + 4) < 0x100000 &&
-          be32(h + 20) >= 16 && be32(h + 20) <= 17) {
+      if (fdt_check(h) >= 0x40 && fdt_be32(h + 4) < 0x100000 &&
+          fdt_be32(h + 20) >= 16 && fdt_be32(h + 20) <= 17) {
         fdt = i;
         puts("boot32: found U-Boot's FDT at "); puthex(fdt); puts("\n");
       }
@@ -516,7 +494,7 @@ void boot32_main(uint32_t fdt, uint32_t argc, char **argv) {
   puthex(fdt);
   puts("\n");
 #endif
-  if (be32((const uint8_t *)fdt) != 0xd00dfeed) {
+  if (!fdt_check((const void *)fdt)) {
     if (!uart_8250)
       uart[12] |= 0x301;
     halt("no device tree in r2");
