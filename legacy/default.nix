@@ -28,7 +28,7 @@ stdenv.mkDerivation {
     $CC -c efi-emulation/exceptions.S -o build/efiemu-exceptions.S.o -m64 -ffreestanding -fno-pic
     shim_objects="build/efiemu-exceptions.S.o"
     for source in legacy/main.c efi-emulation/exceptions.c efi-emulation/firmware.c \
-      efi-emulation/modfs.c efi-emulation/storage.c; do
+      efi-emulation/modfs.c efi-emulation/storage.c kernel/print.c; do
       object="build/$(basename "$(dirname "$source")")-$(basename "$source").o"
       $CC -c "$source" -o "$object" -m64 -ffreestanding \
         -fno-stack-protector -fno-pic -mno-red-zone -mgeneral-regs-only -fshort-wchar -DGNU_EFI_USE_MS_ABI \
@@ -37,7 +37,7 @@ stdenv.mkDerivation {
       shim_objects="$shim_objects $object"
     done
     loader_objects=""
-    for source in src/main.c src/app.c src/boot.c src/console.c src/devtree.c src/fdt.c \
+    for source in src/main.c src/app.c src/boot.c src/console.c src/devtree.c src/env-uefi.c src/fdt.c \
       src/fileio.c src/jump.S src/lowmem.c src/macho.c src/serial.c; do
       object="build/$(basename "$source").o"
       $CC -c "$source" -o "$object" -m64 -ffreestanding -fno-stack-protector \

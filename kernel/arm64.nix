@@ -27,7 +27,7 @@ stdenv.mkDerivation {
     common="$common -funsigned-char -O2 -ggdb -Wno-pointer-sign"
     includes="-Iefi-emulation -Iinclude -Isrc -I${gnu-efi}/include -I${gnu-efi}/include/efi -I${gnu-efi}/include/efi/aarch64"
     includes="$includes -I${gnu-efi}/include/efi/protocol"
-    defines="-DEFI_FUNCTION_WRAPPER -DCONFIG_aarch64 -DCONFIG_LOADER_aarch64 -DXNU_LOADER_PLATFORM_${lib.toUpper platform} -DLEGACY_BIOS"
+    defines="-DEFI_FUNCTION_WRAPPER -DCONFIG_aarch64 -DCONFIG_LOADER_aarch64 -DXNU_LOADER_PLATFORM_${lib.toUpper platform}"
     defines="$defines ${lib.optionalString kernel4k "-DXNU_LOADER_KERNEL_4K"} ${lib.optionalString (markUart != null) "-DXNU_LOADER_MARK_UART=${markUart}"}"
 
     objects=""
@@ -45,8 +45,7 @@ stdenv.mkDerivation {
     $CC -c src/fdt.c -o build/src-fdt.c.o $common -mstrict-align $defines $includes
     $CC -c kernel/fdt_boot.c -o build/kernel-fdt_boot.c.o $common -mstrict-align $defines $includes
     objects="$objects build/kernel-arm64.c.o build/src-fdt_board.c.o build/src-fdt.c.o build/kernel-fdt_boot.c.o"
-    for source in kernel/cpio.c efi-emulation/exceptions.c efi-emulation/firmware.c \
-      efi-emulation/modfs.c efi-emulation/storage.c \
+    for source in kernel/cpio.c kernel/env-booti.c kernel/print.c efi-emulation/exceptions.c \
       src/main.c src/app.c src/boot.c src/console.c src/devtree.c src/devtree-fdt.c src/fileio.c \
       src/lowmem.c src/macho.c src/serial.c; do
       object="build/$(basename "$(dirname "$source")")-$(basename "$source").o"

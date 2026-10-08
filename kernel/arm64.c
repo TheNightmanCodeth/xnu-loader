@@ -1,5 +1,5 @@
 /* arm64 Linux Image protocol: FDT -> EfiEmuBootInfo, an identity map, then
- * the EFI emulation. Runs with the MMU off until arm64_enable_mmu, so this file
+ * the loader with no firmware (kernel_boot). Runs with the MMU off until arm64_enable_mmu, so this file
  * is built with -mstrict-align (Device memory faults on unaligned access). */
 #include "efi_emulation.h"
 #include "serial.h"
@@ -106,7 +106,6 @@ void kernel_arm64_main(UINT64 fdt) {
     for (;;)
       __asm__ volatile("wfi");
   }
-  efiemu_psci_conduit = fdt_facts.psci;
   serial_puts8((CONST CHAR8 *)"xnu-loader kernel: device tree parsed, enabling the MMU\n");
   arm64_enable_mmu();
   serial_reinit();
@@ -129,5 +128,5 @@ void kernel_arm64_main(UINT64 fdt) {
     for (;;)
       __asm__ volatile("wfi");
   }
-  efiemu_main(&boot_info);
+  kernel_boot(&boot_info);
 }

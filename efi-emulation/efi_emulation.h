@@ -109,6 +109,8 @@ typedef struct {
   UINT64 timebase;  /* /cpus timebase-frequency */
 } KernelFdt;
 BOOLEAN kernel_parse_fdt(EfiEmuBootInfo *info, UINT64 fdt, KernelFdt *out);
+/* kernel/env-booti.c: run the loader on what info describes, with no firmware */
+void kernel_boot(EfiEmuBootInfo *info) __attribute__((noreturn));
 /* Logs ram and reservations, then fills info->memory with one less the other */
 void kernel_fdt_memory_map(EfiEmuBootInfo *info);
 void efiemu_debug_string(const char *s);

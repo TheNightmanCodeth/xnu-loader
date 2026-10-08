@@ -1,4 +1,4 @@
-// risc-v linux image protocol: the fdt becomes EfiEmuBootInfo, then the efi emulation runs
+// risc-v linux image protocol: the fdt becomes EfiEmuBootInfo, then the loader runs with no firmware
 // the loader runs bare with satp = 0, so there is no page table to build here
 #include "efi_emulation.h"
 #include "serial.h"
@@ -59,5 +59,5 @@ void kernel_riscv64_main(UINT64 hartid, UINT64 fdt) {
     efiemu_debug_string("xnu-loader kernel: device tree has no memory\n");
     halt();
   }
-  efiemu_main(&boot_info);
+  kernel_boot(&boot_info);
 }

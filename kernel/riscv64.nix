@@ -36,7 +36,7 @@ stdenvNoCC.mkDerivation {
     touch build/shim/string.h build/shim/stdlib.h
     efiinc="-I${efi}/inc -I${efi}/inc/riscv64 -I${efi}/inc/protocol"
     includes="-Iefi-emulation -Iinclude -Isrc -Ibuild/include -Ibuild/shim $efiinc"
-    defines="-DEFI_FUNCTION_WRAPPER -DCONFIG_riscv64 -DCONFIG_LOADER_riscv64 -DLEGACY_BIOS"
+    defines="-DEFI_FUNCTION_WRAPPER -DCONFIG_riscv64 -DCONFIG_LOADER_riscv64"
 
     # gnu-efi's library, BSD licensed, from its own sources
     for source in ${efi}/lib/*.c ${efi}/lib/runtime/*.c ${efi}/lib/riscv64/*.c ${efi}/lib/riscv64/*.S; do
@@ -54,8 +54,8 @@ stdenvNoCC.mkDerivation {
     $cc -c kernel/entry/embedded.S -o build/entry-embedded.S.o -fpie \
       ${lib.optionalString (embeddedInitrd != null) "'-DEMBED_CPIO=\"${embeddedInitrd}\"'"}
     objects="$objects build/entry-embedded.S.o"
-    for source in kernel/riscv64.c kernel/fdt_boot.c kernel/cpio.c efi-emulation/exceptions.c efi-emulation/firmware.c \
-      efi-emulation/modfs.c efi-emulation/storage.c \
+    for source in kernel/riscv64.c kernel/fdt_boot.c kernel/cpio.c kernel/env-booti.c kernel/print.c \
+      efi-emulation/exceptions.c \
       src/riscv64.c src/app.c src/boot.c src/console.c src/devtree.c src/devtree-fdt.c src/fdt.c \
       src/fileio.c src/lowmem.c src/macho.c src/serial.c; do
       object="build/$(basename "$(dirname "$source")")-$(basename "$source").o"

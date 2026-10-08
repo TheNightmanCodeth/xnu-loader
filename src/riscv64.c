@@ -9,7 +9,6 @@
 #include "jump.h"
 #include "macho.h"
 #include "serial.h"
-#include "riscv_efi_boot.h"
 #include "fdt.h"
 
 EFI_PHYSICAL_ADDRESS g_xnu_bootinfo_base;
@@ -33,15 +32,15 @@ static EFI_STATUS get_memory_map(AppContext *ctx, EFI_MEMORY_DESCRIPTOR **out, U
   UINTN size = 0;
   UINT32 version = 0;
   EFI_MEMORY_DESCRIPTOR *map = NULL;
-  uefi_call_wrapper(ctx->bs->GetMemoryMap, 5, &size, NULL, key, desc_size, &version);
+  ctx->env->memory_map(&size, NULL, key, desc_size, &version);
   size += 8 * *desc_size;
-  EFI_STATUS status = uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiLoaderData, size,
+  EFI_STATUS status = ctx->env->allocate_pool(EfiLoaderData, size,
                                         (VOID **)&map);
   if (EFI_ERROR(status))
     return status;
-  status = uefi_call_wrapper(ctx->bs->GetMemoryMap, 5, &size, map, key, desc_size, &version);
+  status = ctx->env->memory_map(&size, map, key, desc_size, &version);
   if (EFI_ERROR(status)) {
-    uefi_call_wrapper(ctx->bs->FreePool, 1, map);
+    ctx->env->free_pool(map);
     return status;
   }
   *out = map;
@@ -96,7 +95,7 @@ static EFI_STATUS find_ram(AppContext *ctx, Span *window, Span *bank) {
   }
   *bank = *window;
   grow_span(map, n, desc_size, bank, TRUE);
-  uefi_call_wrapper(ctx->bs->FreePool, 1, map);
+  ctx->env->free_pool(map);
   return window->hi > window->lo ? EFI_SUCCESS : EFI_NOT_FOUND;
 }
 
@@ -128,8 +127,7 @@ static EFI_STATUS collection_range(MachoImage *image, UINT64 *lo, UINT64 *hi) {
 static const CHAR8 *read_boot_args(AppContext *ctx) {
   const CHAR8 *fallback = (const CHAR8 *)"-v debug=0x8 serial=3 keepsyms=1";
   FileBuffer file = {0};
-  EFI_STATUS status = file_read_all_from_any_volume(ctx, L"\\EFI\\BOOT\\boot-args.txt",
-                                                    &file, NULL);
+  EFI_STATUS status = file_read(ctx, L"\\EFI\\BOOT\\boot-args.txt", 0, &file, NULL);
   if (EFI_ERROR(status) || file.size == 0) {
     log_info(L"no boot-args.txt (%r), using \"%a\"\r\n", status, fallback);
     return fallback;
@@ -159,14 +157,15 @@ static EFI_STATUS exit_boot_services(AppContext *ctx) {
     if (EFI_ERROR(status))
       return status;
     // the pool stays allocated, freeing it would change the key again
-    status = uefi_call_wrapper(ctx->bs->ExitBootServices, 2, ctx->image_handle, key);
+    status = ctx->env->exit(key);
     if (!EFI_ERROR(status))
       return EFI_SUCCESS;
   }
   return EFI_INVALID_PARAMETER;
 }
 
-EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
+/* The loader proper, under whichever boot environment started it (boot_env.h) */
+EFI_STATUS loader_main(BootEnv *env) {
   AppContext ctx;
   FileBuffer kernel = {0}, ramdisk = {0};
   MachoImage image_info;
@@ -174,24 +173,16 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   EFI_STATUS status;
 
   SetMem(&ctx, sizeof(ctx), 0);
-  status = app_init(&ctx, image, st);
+  status = app_init(&ctx, env);
   if (EFI_ERROR(status))
     return status;
   log_info(L"XNU EFI loader start (riscv64)\r\n");
 
-  {
-    static EFI_GUID guid = RISCV_EFI_BOOT_PROTOCOL_GUID;
-    RISCV_EFI_BOOT_PROTOCOL *boot = NULL;
-    UINTN hartid = 0;
-    status = uefi_call_wrapper(ctx.bs->LocateProtocol, 3, &guid, NULL, (VOID **)&boot);
-    if (EFI_ERROR(status) || !boot ||
-        EFI_ERROR(uefi_call_wrapper(boot->GetBootHartId, 2, boot, &hartid))) {
-      log_error(L"no RISCV_EFI_BOOT_PROTOCOL, the boot hart is unknown\r\n");
-      return EFI_UNSUPPORTED;
-    }
-    ctx.boot_hartid = hartid;
-    log_info(L"boot hart %lu\r\n", ctx.boot_hartid);
+  if (ctx.boot_hartid == ~0ULL) {
+    log_error(L"no RISCV_EFI_BOOT_PROTOCOL, the boot hart is unknown\r\n");
+    return EFI_UNSUPPORTED;
   }
+  log_info(L"boot hart %lu\r\n", ctx.boot_hartid);
 
   const UINT8 *fdt = ctx.fdt;
   if (!fdt) {
@@ -200,7 +191,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   }
   UINT64 fdt_size = fdt_check(fdt);
 
-  status = file_read_all_from_any_volume(&ctx, L"\\EFI\\BOOT\\kernel", &kernel, &ctx.boot_volume);
+  status = file_read(&ctx, L"\\EFI\\BOOT\\kernel", 0, &kernel, &ctx.boot_volume);
   if (EFI_ERROR(status)) {
     log_error(L"no kernel collection at \\EFI\\BOOT\\kernel: %r\r\n", status);
     return status;
@@ -232,7 +223,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
 
   const CHAR8 *cmdline = read_boot_args(&ctx);
 
-  status = file_read_all_from_any_volume(&ctx, L"\\ramdisk.img", &ramdisk, NULL);
+  status = file_read(&ctx, L"\\ramdisk.img", 0, &ramdisk, NULL);
   if (EFI_ERROR(status))
     ramdisk.size = 0;
 
@@ -257,7 +248,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   for (UINT64 try = align_up(window.lo, SIZE_2M) + (vm_lo & (SIZE_2M - 1));
        try + total <= window.hi; try += SIZE_2M) {
     EFI_PHYSICAL_ADDRESS at = try;
-    if (!EFI_ERROR(uefi_call_wrapper(ctx.bs->AllocatePages, 4, AllocateAddress, EfiLoaderData,
+    if (!EFI_ERROR(ctx.env->allocate_pages(AllocateAddress, EfiLoaderData,
                                      (UINTN)(total >> EFI_PAGE_SHIFT), &at))) {
       phys_base = try;
       break;
@@ -304,15 +295,15 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   // the bootinfo block goes back to the allocator so dt_build and the boot_args
   // builder can claim their fixed pages inside it
   g_xnu_bootinfo_base = phys_base + span;
-  uefi_call_wrapper(ctx.bs->FreePages, 2, g_xnu_bootinfo_base,
+  ctx.env->free_pages(g_xnu_bootinfo_base,
                     (UINTN)(bootinfo_size >> EFI_PAGE_SHIFT));
 
   ctx.fdt_copy_phys = XNU_BOOTINFO_END;
   ctx.fdt_copy_size = fdt_size;
   CopyMem((VOID *)(UINTN)ctx.fdt_copy_phys, fdt, fdt_size);
   // readers from here on, /efi's configuration table included, see the copy the kernel keeps
-  for (UINTN i = 0; i < ctx.st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx.st->ConfigurationTable[i];
+  for (UINTN i = 0; i < ctx.env->config_table_count; i++) {
+    EFI_CONFIGURATION_TABLE *e = &ctx.env->config_tables[i];
     if (e->VendorTable == ctx.fdt)
       e->VendorTable = (VOID *)(UINTN)ctx.fdt_copy_phys;
   }

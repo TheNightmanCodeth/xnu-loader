@@ -31,15 +31,27 @@ static UINT64 align_up_u64(UINT64 v, UINT64 a) {
   return (v + (a - 1)) & ~(a - 1);
 }
 
+/* The CRC32 every EFI table header carries (CalculateCrc32's) */
+static UINT32 boot_crc32(CONST VOID *data, UINTN size) {
+  CONST UINT8 *p = data;
+  UINT32 crc = ~0U;
+  while (size--) {
+    crc ^= *p++;
+    for (int n = 0; n < 8; ++n)
+      crc = (crc >> 1) ^ (0xedb88320U & -(crc & 1));
+  }
+  return ~crc;
+}
+
 /* Walk ACPI XSDT to find a table by 4-byte signature. Returns physical
  * address of the table header, or 0 if not found. */
 static UINT64 acpi_find_table(AppContext *ctx, const CHAR8 *sig) {
   static const EFI_GUID acpi20 = ACPI_20_TABLE_GUID;
 
-  /* Find RSDP from EFI configuration table */
+  /* Find RSDP from the configuration table */
   UINT64 rsdp_addr = 0;
-  for (UINTN i = 0; i < ctx->st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
+  for (UINTN i = 0; i < ctx->env->config_table_count; i++) {
+    EFI_CONFIGURATION_TABLE *e = &ctx->env->config_tables[i];
     if (CompareMem(&e->VendorGuid, &acpi20, sizeof(EFI_GUID)) == 0) {
       rsdp_addr = (UINT64)(UINTN)e->VendorTable;
       break;
@@ -106,10 +118,7 @@ EFI_STATUS boot_collect_memory_map(
   desc_size = 0;
   desc_ver = 0;
 
-  status = uefi_call_wrapper(
-      ctx->bs->GetMemoryMap,
-      5,
-      &map_size,
+  status = ctx->env->memory_map(&map_size,
       tmp_map,
       &key,
       &desc_size,
@@ -124,10 +133,7 @@ EFI_STATUS boot_collect_memory_map(
   if (EFI_ERROR(status))
     return status;
 
-  status = uefi_call_wrapper(
-      ctx->bs->GetMemoryMap,
-      5,
-      &map_size,
+  status = ctx->env->memory_map(&map_size,
       tmp_map,
       &key,
       &desc_size,
@@ -190,10 +196,7 @@ EFI_STATUS boot_refresh_memory_map(
 
     map_size = state->memory_map_buf.pages << EFI_PAGE_SHIFT;
 
-    status = uefi_call_wrapper(
-        ctx->bs->GetMemoryMap,
-        5,
-        &map_size,
+    status = ctx->env->memory_map(&map_size,
         state->memory_map_buf.ptr,
         &key,
         &desc_size,
@@ -329,8 +332,7 @@ EFI_STATUS boot_build_args(
 
   {
     EFI_PHYSICAL_ADDRESS args_phys = XNU_BOOTARGS_PHYS;
-    status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-        AllocateAddress, EfiLoaderData, 1, &args_phys);
+    status = ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, 1, &args_phys);
     if (EFI_ERROR(status)) {
       log_error(L"boot_args: AllocateAddress(0x%lx) failed: %r\r\n",
                 (UINT64)XNU_BOOTARGS_PHYS, status);
@@ -361,16 +363,20 @@ EFI_STATUS boot_build_args(
    * produces KVAs that fault on access. Copy the structs to a pinned page in
    * conventional memory (always in the physmap) so XNU can read them. */
   {
+    EFI_SYSTEM_TABLE *st = ctx->env->system_table;
     EFI_PHYSICAL_ADDRESS tbl_phys = XNU_EFITABLES_PHYS;
-    if (!EFI_ERROR(uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-            AllocateAddress, EfiLoaderData, 1, &tbl_phys))) {
+    if (!st) {
+      /* No firmware underneath: no system table to hand on, and the kernels
+       * booted this way (arm64, riscv64) never look for one. */
+      log_info(L"no EFI system table to copy\r\n");
+    } else if (!EFI_ERROR(ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, 1, &tbl_phys))) {
       UINT8 *page = (UINT8 *)(UINTN)tbl_phys;
       EFI_SYSTEM_TABLE *st_copy = (EFI_SYSTEM_TABLE *)page;
       EFI_RUNTIME_SERVICES *rt_copy = (EFI_RUNTIME_SERVICES *)(page + 0x200);
       state->rt_table_phys = (UINT64)(UINTN)rt_copy;
 
-      XnuCopyMem(st_copy, ctx->st, sizeof(EFI_SYSTEM_TABLE));
-      XnuCopyMem(rt_copy, ctx->st->RuntimeServices, sizeof(EFI_RUNTIME_SERVICES));
+      XnuCopyMem(st_copy, st, sizeof(EFI_SYSTEM_TABLE));
+      XnuCopyMem(rt_copy, st->RuntimeServices, sizeof(EFI_RUNTIME_SERVICES));
       /*
        * XNU's efi_set_tables_64() dereferences SystemTable->RuntimeServices
        * DIRECTLY (no ml_static_ptovirt), unlike the configuration-table walk.
@@ -390,16 +396,16 @@ EFI_STATUS boot_build_args(
        *
        * Layout: page+0x000=EFI_SYSTEM_TABLE, page+0x200=EFI_RUNTIME_SERVICES,
        *         page+0x400=EFI_CONFIGURATION_TABLE[n] */
-      if (ctx->st->NumberOfTableEntries > 0 && ctx->st->ConfigurationTable) {
+      if (st->NumberOfTableEntries > 0 && st->ConfigurationTable) {
         EFI_CONFIGURATION_TABLE *cfg_copy =
             (EFI_CONFIGURATION_TABLE *)(page + 0x400);
         UINTN cfg_size =
-            ctx->st->NumberOfTableEntries * sizeof(EFI_CONFIGURATION_TABLE);
-        XnuCopyMem(cfg_copy, ctx->st->ConfigurationTable, cfg_size);
+            st->NumberOfTableEntries * sizeof(EFI_CONFIGURATION_TABLE);
+        XnuCopyMem(cfg_copy, st->ConfigurationTable, cfg_size);
         st_copy->ConfigurationTable = cfg_copy;
-        st_copy->NumberOfTableEntries = ctx->st->NumberOfTableEntries;
+        st_copy->NumberOfTableEntries = st->NumberOfTableEntries;
         log_info(L"EFI config table: %lu entries copied to 0x%lx\r\n",
-                 ctx->st->NumberOfTableEntries, (UINT64)(UINTN)cfg_copy);
+                 st->NumberOfTableEntries, (UINT64)(UINTN)cfg_copy);
 
         /*
          * XNU's configuration-table walk (efi_get_cfgtbl_by_guid, reached from
@@ -412,7 +418,7 @@ EFI_STATUS boot_build_args(
         if (sizeof(VOID *) == 4) {
           UINT8  *st_bytes = (UINT8 *)st_copy;
           UINT8  *wide     = (UINT8 *)(page + 0x800);
-          UINTN   entries  = ctx->st->NumberOfTableEntries;
+          UINTN   entries  = st->NumberOfTableEntries;
           UINTN   i;
 
           /* One page is allocated for all of this, so the widened array has
@@ -427,7 +433,7 @@ EFI_STATUS boot_build_args(
           /* Widen each entry to the 64-bit layout: GUID (16) + 8-byte
            * VendorTable, giving the 24-byte stride the walk steps by. */
           for (i = 0; i < entries; i++) {
-            UINT8 *src = (UINT8 *)ctx->st->ConfigurationTable +
+            UINT8 *src = (UINT8 *)st->ConfigurationTable +
                          i * sizeof(EFI_CONFIGURATION_TABLE);
             UINT8 *dst = wide + i * 24;
             UINTN  b;
@@ -485,8 +491,7 @@ EFI_STATUS boot_build_args(
       {
         UINT32 new_crc = 0;
         st_copy->Hdr.CRC32 = 0;
-        uefi_call_wrapper(ctx->bs->CalculateCrc32, 3,
-                          st_copy, st_copy->Hdr.HeaderSize, &new_crc);
+        new_crc = boot_crc32(st_copy, st_copy->Hdr.HeaderSize);
         st_copy->Hdr.CRC32 = new_crc;
         log_info(L"EFI_SYSTEM_TABLE CRC32 recomputed: 0x%x\r\n", new_crc);
       }
@@ -495,9 +500,9 @@ EFI_STATUS boot_build_args(
       log_info(L"EFI tables copied to 0x%lx (st) / 0x%lx (rt)\r\n",
                (UINT64)tbl_phys, (UINT64)(tbl_phys + 0x200));
     } else {
-      args->efiSystemTable = (UINT32)(UINTN)ctx->st;
+      args->efiSystemTable = (UINT32)(UINTN)st;
       log_info(L"EFI table copy failed, using original 0x%lx\r\n",
-               (UINT64)(UINTN)ctx->st);
+               (UINT64)(UINTN)st);
     }
 
     /* Record physical page range for runtime-flagged descriptors.
@@ -625,10 +630,10 @@ EFI_STATUS boot_build_args(
 }
 
 /*
- * Locate the firmware's GOP and settle on a linear mode, reporting the result
- * in width/height/stride/base. found is left FALSE for every "no display here"
- * outcome - no GOP at all, or only Blt-only modes - which is not an error: XNU
- * boots fine on the serial console with v_display zeroed.
+ * The linear framebuffer the boot environment offers (the firmware's GOP, or a
+ * boot protocol's simple framebuffer), reported in width/height/stride/base.
+ * found is left FALSE when there is none, which is not an error: XNU boots fine
+ * on the serial console with v_display zeroed.
  *
  * Split out from boot_fill_video() because arm64's Boot_Video is the same six
  * fields at 64 bits wide, so only the probe can be shared, not the assignment.
@@ -638,97 +643,29 @@ static EFI_STATUS boot_probe_video(
     const CHAR8 *cmdline,
     boot_video_info *out)
 {
+  BootFramebuffer fb;
+
   if (!ctx || !out)
       return EFI_INVALID_PARAMETER;
 
   SetMem(out, sizeof(*out), 0);
-
-  EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-
-  EFI_STATUS status = uefi_call_wrapper(
-      ctx->bs->LocateProtocol,
-      3,
-      &gEfiGraphicsOutputProtocolGuid,
-      NULL,
-      (VOID **)&gop);
-
-  /* No GOP (headless firmware, no display attached, UGA-only board, etc.):
-   * leave args->Video/VideoV1 zeroed (v_display=0) and continue - XNU boots
-   * fine on the serial console alone (serial=3 in the boot-args cmdline)
-   * without a framebuffer. Only actual protocol/mode errors after a GOP was
-   * located are treated as fatal, since those indicate a broken GOP rather
-   * than its absence. */
-  if (EFI_ERROR(status) || !gop || !gop->Mode || !gop->Mode->Info) {
-    log_info(L"boot_probe_video: no usable GOP (%r), continuing headless\r\n", status);
+  if (!ctx->env->framebuffer(cmdline, &fb))
     return EFI_SUCCESS;
-  }
-
-  /* XNU needs a LINEAR framebuffer.  The firmware's current GOP mode is
-   * normally the native panel resolution with a linear framebuffer, so keep it
-   * when it is RGBX(0)/BGRX(1).  Only if the current mode is BltOnly/bitmask
-   * (no CPU-addressable framebuffer) do we search for the highest-resolution
-   * linear mode and switch to it. */
-  {
-    EFI_GRAPHICS_PIXEL_FORMAT curfmt = gop->Mode->Info->PixelFormat;
-    BOOLEAN cur_linear =
-        (curfmt == PixelRedGreenBlueReserved8BitPerColor ||
-         curfmt == PixelBlueGreenRedReserved8BitPerColor);
-
-    if (!cur_linear) {
-      UINT32 best_mode = gop->Mode->MaxMode; /* sentinel = none found */
-      UINT64 best_px   = 0;
-      for (UINT32 m = 0; m < gop->Mode->MaxMode; m++) {
-        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = NULL;
-        UINTN misz = 0;
-        if (EFI_ERROR(uefi_call_wrapper(gop->QueryMode, 4, gop, m, &misz, &mi)) || !mi)
-          continue;
-        if (mi->PixelFormat != PixelRedGreenBlueReserved8BitPerColor &&
-            mi->PixelFormat != PixelBlueGreenRedReserved8BitPerColor)
-          continue;
-        UINT64 px = (UINT64)mi->HorizontalResolution * mi->VerticalResolution;
-        if (px > best_px) {
-          best_px   = px;
-          best_mode = m;
-        }
-      }
-      if (best_mode == gop->Mode->MaxMode) {
-        log_info(L"boot_probe_video: current mode not linear and no linear mode "
-                 L"found, continuing headless\r\n");
-        return EFI_SUCCESS;
-      }
-      log_info(L"boot_probe_video: current mode not linear, switching to mode %u\r\n",
-               best_mode);
-      status = uefi_call_wrapper(gop->SetMode, 2, gop, best_mode);
-      if (EFI_ERROR(status)) {
-        log_info(L"boot_probe_video: SetMode(%u) failed: %r, continuing headless\r\n",
-                 best_mode, status);
-        return EFI_SUCCESS;
-      }
-    }
-  }
-
-  UINT32 width = gop->Mode->Info->HorizontalResolution;
-  UINT32 height = gop->Mode->Info->VerticalResolution;
-  UINT32 stride = gop->Mode->Info->PixelsPerScanLine * 4;
-  UINT64 fb_base  = gop->Mode->FrameBufferBase;
-
-  UINT8 pixel_fmt = (UINT8)gop->Mode->Info->PixelFormat;
 
 #ifdef VERBOSE_BOOT
-  log_info(L"boot_probe_video: %ux%u stride=%u fb=0x%lx pixfmt=%u\r\n",
-           width, height, stride, fb_base, (UINT32)pixel_fmt);
+  log_info(L"boot_probe_video: %ux%u stride=%u fb=0x%lx\r\n",
+           fb.width, fb.height, fb.pixels_per_scanline * 4, fb.base);
 #endif // VERBOSE_BOOT
 
   out->found     = TRUE;
-  out->base_addr = fb_base;
-  out->row_bytes = stride;
-  out->width     = width;
-  out->height    = height;
+  out->base_addr = fb.base;
+  out->row_bytes = fb.pixels_per_scanline * 4;
+  out->width     = fb.width;
+  out->height    = fb.height;
   out->depth     = 32;
   out->display   = boot_cmdline_has_flag(cmdline, (const CHAR8 *)"-v")
                        ? FB_TEXT_MODE
                        : GRAPHICS_MODE;
-  (void)pixel_fmt;
 
   return EFI_SUCCESS;
 }
@@ -897,7 +834,6 @@ static VOID boot_sort_memory_map(UINT8 *map, UINTN map_sz, UINTN desc_sz) {
 
 EFI_STATUS exit_boot_services_retry(
     AppContext *ctx,
-    EFI_HANDLE image,
     BootArgsState *state)
 {
   EFI_STATUS status;
@@ -929,10 +865,7 @@ EFI_STATUS exit_boot_services_retry(
     if (mask_irqs)
       IRQ_DISABLE();
 
-    status = uefi_call_wrapper(
-        ctx->bs->GetMemoryMap,
-        5,
-        &map_size,
+    status = ctx->env->memory_map(&map_size,
         state->memory_map_buf.ptr,
         &key,
         &desc_size,
@@ -958,11 +891,7 @@ EFI_STATUS exit_boot_services_retry(
     state->args->MemoryMapDescriptorSize = (UINT32)desc_size;
     state->args->MemoryMapDescriptorVersion = desc_ver;
 
-    status = uefi_call_wrapper(
-        ctx->bs->ExitBootServices,
-        2,
-        image,
-        key);
+    status = ctx->env->exit(key);
 
     if (status == EFI_SUCCESS) {
       serial_reinit();
@@ -973,7 +902,10 @@ EFI_STATUS exit_boot_services_retry(
         * stalled in them. Firmware keeps its physical mapping. */
         return EFI_SUCCESS;
       #endif
-      EFI_RUNTIME_SERVICES *rt = ctx->st->RuntimeServices;
+      /* No firmware underneath, no runtime services to move */
+      EFI_RUNTIME_SERVICES *rt = ctx->env->runtime;
+      if (!rt)
+        return EFI_SUCCESS;
       UINT8 *rmap = (UINT8 *)state->memory_map_buf.ptr;
       UINTN rdesc_sz = state->descriptor_size;
       UINTN rmap_sz  = state->memory_map_size;
@@ -1111,8 +1043,7 @@ EFI_STATUS arm64_boot_build_args(
 
   {
     EFI_PHYSICAL_ADDRESS args_phys = XNU_ARM64_BOOTARGS_PHYS;
-    status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-        AllocateAddress, EfiLoaderData, 1, &args_phys);
+    status = ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, 1, &args_phys);
     if (EFI_ERROR(status)) {
       log_error(L"arm64 boot_args: AllocateAddress(0x%lx) failed: %r\r\n",
                 (UINT64)XNU_ARM64_BOOTARGS_PHYS, status);

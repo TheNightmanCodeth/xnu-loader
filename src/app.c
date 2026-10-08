@@ -4,36 +4,32 @@
 #include "platform.h"
 #include "fdt.h"
 
-// the tree the firmware installed as a configuration table, checked once here for every reader
-static CONST VOID *firmware_fdt(EFI_SYSTEM_TABLE *st) {
+// the tree the firmware or boot protocol handed over, checked once here for every reader
+static CONST VOID *env_fdt(BootEnv *env) {
   static EFI_GUID dtb_guid = { 0xb1b621d5, 0xf19c, 0x41a5, { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
 
-  for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &st->ConfigurationTable[i];
+  for (UINTN i = 0; i < env->config_table_count; i++) {
+    EFI_CONFIGURATION_TABLE *e = &env->config_tables[i];
     if (!CompareMem(&e->VendorGuid, &dtb_guid, sizeof(EFI_GUID)))
       return fdt_check(e->VendorTable) ? e->VendorTable : NULL;
   }
   return NULL;
 }
 
-EFI_STATUS app_init(AppContext *ctx, EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
-  if (!st)
+EFI_STATUS app_init(AppContext *ctx, BootEnv *env) {
+  if (!ctx || !env)
     return EFI_INVALID_PARAMETER;
-
-  if (!ctx || st->Hdr.Signature != EFI_SYSTEM_TABLE_SIGNATURE)
-    return EFI_ABORTED;
 
   // ensure there's no leftover data. this caused a bug on some machines
   // to falsely report having a RAMDisk when it did not.
   SetMem(ctx, sizeof(*ctx), 0);
 
-  ctx->image_handle = image;
-  ctx->st = st;
-  ctx->bs = st->BootServices;
-  ctx->rt = st->RuntimeServices;
-
-  InitializeLib(image, st);
-  ctx->fdt = firmware_fdt(st);
+  ctx->env = env;
+  console_attach(env);
+  ctx->fdt = env_fdt(env);
+#if defined(__riscv)
+  ctx->boot_hartid = env->boot_hartid;
+#endif
 
 #if defined(__aarch64__) && defined(XNU_LOADER_PLATFORM_GENERIC)
   // the console and the rest of the board come from the firmware's device tree, else the build's defaults
@@ -47,48 +43,13 @@ EFI_STATUS app_init(AppContext *ctx, EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   return EFI_SUCCESS;
 }
 
-EFI_STATUS app_get_loaded_image(AppContext *ctx, EFI_LOADED_IMAGE **loaded_image) {
-  return uefi_call_wrapper(
-      ctx->bs->HandleProtocol,
-      3,
-      ctx->image_handle,
-      &LoadedImageProtocol,
-      (VOID **)loaded_image);
-}
-
-EFI_STATUS app_open_self_volume(AppContext *ctx, EFI_FILE_PROTOCOL **root) {
-  EFI_STATUS status;
-  EFI_LOADED_IMAGE *loaded_image = NULL;
-  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
-
-  status = app_get_loaded_image(ctx, &loaded_image);
-  if (EFI_ERROR(status))
-    return status;
-
-  status = uefi_call_wrapper(
-      ctx->bs->HandleProtocol,
-      3,
-      loaded_image->DeviceHandle,
-      &gEfiSimpleFileSystemProtocolGuid,
-      (VOID **)&fs);
-  if (EFI_ERROR(status))
-    return status;
-
-  return uefi_call_wrapper(fs->OpenVolume, 2, fs, root);
-}
-
 EFI_STATUS app_alloc_pool(AppContext *ctx, UINTN size, VOID **ptr) {
-  return uefi_call_wrapper(
-      ctx->bs->AllocatePool,
-      3,
-      EfiLoaderData,
-      size,
-      ptr);
+  return ctx->env->allocate_pool(EfiLoaderData, size, ptr);
 }
 
 VOID app_free_pool(AppContext *ctx, VOID *ptr) {
   if (ptr)
-    uefi_call_wrapper(ctx->bs->FreePool, 1, ptr);
+    ctx->env->free_pool(ptr);
 }
 
 UINT64 app_detect_physical_memory_size(AppContext *ctx) {
@@ -97,19 +58,16 @@ UINT64 app_detect_physical_memory_size(AppContext *ctx) {
   EFI_MEMORY_DESCRIPTOR *mm = NULL;
   UINT64 total = 0;
 
-  uefi_call_wrapper(ctx->bs->GetMemoryMap, 5,
-      &map_size, mm, &key, &desc_size, &desc_ver);
+  ctx->env->memory_map(&map_size, mm, &key, &desc_size, &desc_ver);
   map_size += desc_size * 4;
 
-  EFI_STATUS s = uefi_call_wrapper(ctx->bs->AllocatePool, 3,
-      EfiLoaderData, map_size, (VOID **)&mm);
+  EFI_STATUS s = ctx->env->allocate_pool(EfiLoaderData, map_size, (VOID **)&mm);
   if (EFI_ERROR(s) || !mm)
     return 0;
 
-  s = uefi_call_wrapper(ctx->bs->GetMemoryMap, 5,
-      &map_size, mm, &key, &desc_size, &desc_ver);
+  s = ctx->env->memory_map(&map_size, mm, &key, &desc_size, &desc_ver);
   if (EFI_ERROR(s)) {
-    uefi_call_wrapper(ctx->bs->FreePool, 1, mm);
+    ctx->env->free_pool(mm);
     return 0;
   }
 
@@ -131,6 +89,6 @@ UINT64 app_detect_physical_memory_size(AppContext *ctx) {
     }
   }
 
-  uefi_call_wrapper(ctx->bs->FreePool, 1, mm);
+  ctx->env->free_pool(mm);
   return total;
 }

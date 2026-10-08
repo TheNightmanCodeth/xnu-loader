@@ -4,6 +4,7 @@
 #include <efi.h>
 #include <efilib.h>
 #include <string.h>
+#include "boot_env.h"
 
 /* Firmware CPU family. A 32-bit UEFI implementation runs on the same x86 CPU
  * as a 64-bit one, so port I/O, cli/sti and rdtsc are shared - only pointer
@@ -108,11 +109,10 @@ static inline VOID *XnuSetMem(VOID *dst, UINTN n, UINT8 val) {
 #define SetMem(dst, n, val) XnuSetMem((VOID *)(UINTN)(dst), (UINTN)(n), (UINT8)(val))
 
 typedef struct AppContext {
-  EFI_HANDLE image_handle;
-  EFI_SYSTEM_TABLE *st;
-  EFI_BOOT_SERVICES *bs;
-  EFI_RUNTIME_SERVICES *rt;
-  EFI_HANDLE boot_volume;
+  /* Whatever started the loader: UEFI firmware or a boot protocol (boot_env.h). */
+  BootEnv *env;
+  /* Where the kernel was read from, a UEFI handle; NULL without firmware volumes. */
+  VOID *boot_volume;
   UINT32 kslide;
   UINT64 phys_base;
   EFI_PHYSICAL_ADDRESS kernel_region_base;
@@ -132,14 +132,9 @@ typedef struct AppContext {
   UINT64 dram_size;
   EFI_PHYSICAL_ADDRESS fdt_copy_phys;
   UINT64 fdt_copy_size;
-  // from RISCV_EFI_BOOT_PROTOCOL, the kernel gets it in a1
+  // the hart that booted, the kernel gets it in a1
   UINT64 boot_hartid;
 #endif
 } AppContext;
-
-typedef struct FileBuffer {
-  VOID *data;
-  UINTN size;
-} FileBuffer;
 
 #endif

@@ -250,6 +250,6 @@ VOID boot_free_args(AppContext *ctx, BootArgsState *state);
 
 VOID boot_log_args(BootArgsState *state);
 
-EFI_STATUS exit_boot_services_retry(AppContext *ctx, EFI_HANDLE image, BootArgsState *state);
+EFI_STATUS exit_boot_services_retry(AppContext *ctx, BootArgsState *state);
 
 #endif

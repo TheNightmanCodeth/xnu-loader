@@ -2,16 +2,23 @@
 #include "serial.h"
 #include <stdarg.h>
 
-/* Format once, then fan the result out to both the EFI console (while boot
- * services are alive) and the COM3 UART (works pre- and post-ExitBootServices,
- * so a serial cable captures the full boot on real hardware). */
+static BootEnv *g_console_env;
+
+VOID console_attach(BootEnv *env) {
+  g_console_env = env;
+}
+
+/* Format once, then fan the result out to both the boot environment's console
+ * (the EFI console while boot services are alive) and the COM3 UART (works pre-
+ * and post-ExitBootServices, so a serial cable captures the full boot on real
+ * hardware). */
 static VOID log_emit(CONST CHAR16 *fmt, va_list args) {
   CHAR16 buf[512];
 
   VSPrint(buf, sizeof(buf), (CHAR16 *)fmt, args);
 
-  if (ST != NULL && ST->ConOut != NULL)
-    uefi_call_wrapper(ST->ConOut->OutputString, 2, ST->ConOut, buf);
+  if (g_console_env != NULL)
+    g_console_env->console(buf);
 
 #if !defined(__aarch64__) && !defined(__riscv)
   serial_put16(buf);

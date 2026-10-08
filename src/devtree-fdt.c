@@ -130,7 +130,7 @@ static void import_prop(AppContext *ctx, FdtLevel *lv, const CHAR8 *name, const 
     return;
   }
   if (len > sizeof(stack_buf) &&
-      EFI_ERROR(uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, len,
+      EFI_ERROR(ctx->env->allocate_pool(EfiBootServicesData, len,
                                   (VOID **)&out)))
     return;
 
@@ -171,7 +171,7 @@ static void import_prop(AppContext *ctx, FdtLevel *lv, const CHAR8 *name, const 
   if (fdt_str_eq(name, "phandle"))
     add_prop(ctx, node, "AAPL,phandle", out, len);
   if (out != stack_buf)
-    uefi_call_wrapper(ctx->bs->FreePool, 1, out);
+    ctx->env->free_pool(out);
 }
 
 // a node's properties all come before its children, so what the conversion needs is read ahead
@@ -248,7 +248,7 @@ static BOOLEAN split_interrupts_extended(AppContext *ctx, DeviceTreeNode *node, 
   BOOLEAN ok = FALSE;
 
   if (len == 0 || len % 4 != 0 ||
-      EFI_ERROR(uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, 2 * len,
+      EFI_ERROR(ctx->env->allocate_pool(EfiBootServicesData, 2 * len,
                                   (VOID **)&parents)))
     return FALSE;
   specs = parents + ncells;
@@ -268,7 +268,7 @@ static BOOLEAN split_interrupts_extended(AppContext *ctx, DeviceTreeNode *node, 
   add_prop(ctx, node, "interrupt-parent", parents, one_parent ? 4 : 4 * nirq);
   ok = TRUE;
 out:
-  uefi_call_wrapper(ctx->bs->FreePool, 1, parents);
+  ctx->env->free_pool(parents);
   return ok;
 }
 

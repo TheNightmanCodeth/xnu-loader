@@ -121,7 +121,7 @@ static UINTN dt_wcs_len(const CHAR16 *s) {
 
 DeviceTreeNode *dt_create_node(AppContext *ctx) {
   DeviceTreeNode *node = NULL;
-  uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, sizeof(DeviceTreeNode), (VOID **)&node);
+  ctx->env->allocate_pool(EfiBootServicesData, sizeof(DeviceTreeNode), (VOID **)&node);
   if (node)
     SetMem(node, sizeof(DeviceTreeNode), 0);
   return node;
@@ -129,7 +129,7 @@ DeviceTreeNode *dt_create_node(AppContext *ctx) {
 
 DeviceTreeNodeProperty *dt_create_property(AppContext *ctx, const CHAR8 *name, VOID *data, UINT32 len) {
   DeviceTreeNodeProperty *prop = NULL;
-  uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, sizeof(DeviceTreeNodeProperty), (VOID **)&prop);
+  ctx->env->allocate_pool(EfiBootServicesData, sizeof(DeviceTreeNodeProperty), (VOID **)&prop);
   if (!prop)
     return NULL;
 
@@ -143,7 +143,7 @@ DeviceTreeNodeProperty *dt_create_property(AppContext *ctx, const CHAR8 *name, V
 
   prop->length = len;
   if (len && data) {
-    uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, len, (VOID **)&prop->value);
+    ctx->env->allocate_pool(EfiBootServicesData, len, (VOID **)&prop->value);
     if (prop->value)
       CopyMem(prop->value, data, len);
   }
@@ -153,13 +153,13 @@ DeviceTreeNodeProperty *dt_create_property(AppContext *ctx, const CHAR8 *name, V
 
 VOID dt_add_property(AppContext *ctx, DeviceTreeNode *node, DeviceTreeNodeProperty *prop) {
   DeviceTreeNodeProperty **newProps = NULL;
-  uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, sizeof(DeviceTreeNodeProperty*) * (node->nProperties + 1), (VOID **)&newProps);
+  ctx->env->allocate_pool(EfiBootServicesData, sizeof(DeviceTreeNodeProperty*) * (node->nProperties + 1), (VOID **)&newProps);
   if (!newProps)
     return;
 
   if (node->properties) {
     CopyMem(newProps, node->properties, sizeof(DeviceTreeNodeProperty*) * node->nProperties);
-    uefi_call_wrapper(ctx->bs->FreePool, 1, node->properties);
+    ctx->env->free_pool(node->properties);
   }
 
   newProps[node->nProperties++] = prop;
@@ -168,13 +168,13 @@ VOID dt_add_property(AppContext *ctx, DeviceTreeNode *node, DeviceTreeNodeProper
 
 VOID dt_add_child(AppContext *ctx, DeviceTreeNode *parent, DeviceTreeNode *child) {
   DeviceTreeNode **newChildren = NULL;
-  uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiBootServicesData, sizeof(DeviceTreeNode*) * (parent->nChildren + 1), (VOID **)&newChildren);
+  ctx->env->allocate_pool(EfiBootServicesData, sizeof(DeviceTreeNode*) * (parent->nChildren + 1), (VOID **)&newChildren);
   if (!newChildren)
     return;
 
   if (parent->children) {
     CopyMem(newChildren, parent->children, sizeof(DeviceTreeNode*) * parent->nChildren);
-    uefi_call_wrapper(ctx->bs->FreePool, 1, parent->children);
+    ctx->env->free_pool(parent->children);
   }
 
   newChildren[parent->nChildren++] = child;
@@ -235,8 +235,8 @@ static BOOLEAN smbios_system_uuid(AppContext *ctx, UINT8 out[16]) {
   UINT8 *tables = NULL;
   UINTN  tables_len = 0;
 
-  for (UINTN i = 0; i < ctx->st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
+  for (UINTN i = 0; i < ctx->env->config_table_count; i++) {
+    EFI_CONFIGURATION_TABLE *e = &ctx->env->config_tables[i];
     UINT8 *ep = (UINT8 *)e->VendorTable;
     if (!ep) continue;
 
@@ -318,8 +318,8 @@ static UINTN acpi_cpu_mpidrs(AppContext *ctx, UINT64 *out, UINTN max) {
   UINT8 *rsdp = NULL;
   UINTN found = 0;
 
-  for (UINTN i = 0; i < ctx->st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
+  for (UINTN i = 0; i < ctx->env->config_table_count; i++) {
+    EFI_CONFIGURATION_TABLE *e = &ctx->env->config_tables[i];
     if (!CompareMem(&e->VendorGuid, &acpi20, sizeof(EFI_GUID)) ||
         (rsdp == NULL && !CompareMem(&e->VendorGuid, &acpi10, sizeof(EFI_GUID))))
       rsdp = (UINT8 *)e->VendorTable;
@@ -473,7 +473,7 @@ static UINT64 rdtsc64_raw(void) {
 static UINT64 estimate_tsc_frequency(AppContext *ctx, UINT64 *initial_tsc) {
   const UINTN usec = 20000;
   UINT64 start = rdtsc64_raw();
-  uefi_call_wrapper(ctx->bs->Stall, 1, usec);
+  ctx->env->stall(usec);
   UINT64 end = rdtsc64_raw();
 
   if (initial_tsc)
@@ -825,29 +825,32 @@ static BOOLEAN read_hfs_uuid_from_blockio(XnuBlockIoProtocol *bio, CHAR8 uuid_st
 }
 
 static BOOLEAN find_hfs_boot_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
+  EFI_BOOT_SERVICES *bs = ctx->env->firmware;
+  if (!bs)
+    return FALSE;
   static EFI_GUID block_io_guid =
       { 0x964e5b21, 0x6459, 0x11d2, { 0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b } };
   EFI_HANDLE *handles = NULL;
   UINTN count = 0;
   EFI_STATUS status;
 
-  status = uefi_call_wrapper(ctx->bs->LocateHandleBuffer, 5,
+  status = uefi_call_wrapper(bs->LocateHandleBuffer, 5,
                              ByProtocol, &block_io_guid, NULL, &count, &handles);
   if (EFI_ERROR(status))
     return FALSE;
 
   for (UINTN i = 0; i < count; i++) {
     XnuBlockIoProtocol *bio = NULL;
-    if (EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+    if (EFI_ERROR(uefi_call_wrapper(bs->HandleProtocol, 3,
                                     handles[i], &block_io_guid, (VOID **)&bio)))
       continue;
     if (read_hfs_uuid_from_blockio(bio, uuid_str)) {
-      uefi_call_wrapper(ctx->bs->FreePool, 1, handles);
+      uefi_call_wrapper(bs->FreePool, 1, handles);
       return TRUE;
     }
   }
 
-  uefi_call_wrapper(ctx->bs->FreePool, 1, handles);
+  uefi_call_wrapper(bs->FreePool, 1, handles);
   return FALSE;
 }
 
@@ -917,14 +920,17 @@ static UINTN dp_total_size(EFI_DEVICE_PATH *dp) {
 }
 
 static BOOLEAN dp_is_boot_disk(AppContext *ctx, EFI_HANDLE cand) {
+  EFI_BOOT_SERVICES *bs = ctx->env->firmware;
+  if (!bs)
+    return FALSE;
   static EFI_GUID dp_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
   EFI_DEVICE_PATH *boot_dp = NULL, *cand_dp = NULL;
 
   if (!ctx->boot_volume) return FALSE;
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+  if (EFI_ERROR(uefi_call_wrapper(bs->HandleProtocol, 3,
                                   ctx->boot_volume, &dp_guid, (VOID **)&boot_dp)))
     return FALSE;
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+  if (EFI_ERROR(uefi_call_wrapper(bs->HandleProtocol, 3,
                                   cand, &dp_guid, (VOID **)&cand_dp)))
     return FALSE;
 
@@ -990,12 +996,15 @@ static BOOLEAN read_apfs_uuid_from_blockio(XnuBlockIoProtocol *bio, CHAR8 uuid_s
 }
 
 static BOOLEAN find_apfs_boot_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
+  EFI_BOOT_SERVICES *bs = ctx->env->firmware;
+  if (!bs)
+    return FALSE;
   static EFI_GUID block_io_guid =
       { 0x964e5b21, 0x6459, 0x11d2, { 0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b } };
   EFI_HANDLE *handles = NULL;
   UINTN count = 0;
 
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->LocateHandleBuffer, 5,
+  if (EFI_ERROR(uefi_call_wrapper(bs->LocateHandleBuffer, 5,
                                   ByProtocol, &block_io_guid, NULL, &count, &handles)))
     return FALSE;
 
@@ -1007,27 +1016,30 @@ static BOOLEAN find_apfs_boot_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
 
       if ((pass == 0) != (on_boot_disk != FALSE))
         continue;
-      if (EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+      if (EFI_ERROR(uefi_call_wrapper(bs->HandleProtocol, 3,
                                       handles[i], &block_io_guid, (VOID **)&bio)))
         continue;
       if (read_apfs_uuid_from_blockio(bio, uuid_str)) {
-        uefi_call_wrapper(ctx->bs->FreePool, 1, handles);
+        uefi_call_wrapper(bs->FreePool, 1, handles);
         return TRUE;
       }
     }
   }
 
-  uefi_call_wrapper(ctx->bs->FreePool, 1, handles);
+  uefi_call_wrapper(bs->FreePool, 1, handles);
   return FALSE;
 }
 
 static BOOLEAN find_ext4_boot_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
+  EFI_BOOT_SERVICES *bs = ctx->env->firmware;
+  if (!bs)
+    return FALSE;
   static EFI_GUID block_io_guid =
       { 0x964e5b21, 0x6459, 0x11d2, { 0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b } };
   EFI_HANDLE *handles = NULL;
   UINTN count = 0;
 
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->LocateHandleBuffer, 5,
+  if (EFI_ERROR(uefi_call_wrapper(bs->LocateHandleBuffer, 5,
                                   ByProtocol, &block_io_guid, NULL, &count, &handles)))
     return FALSE;
 
@@ -1039,19 +1051,19 @@ static BOOLEAN find_ext4_boot_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
       if (pass == 0 && !on_boot_disk) continue;
       if (pass == 1 && on_boot_disk) continue;   /* already tried */
 
-      if (EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+      if (EFI_ERROR(uefi_call_wrapper(bs->HandleProtocol, 3,
                                       handles[i], &block_io_guid, (VOID **)&bio)))
         continue;
       if (read_ext4_uuid_from_blockio(bio, uuid_str)) {
         log_info(L"DT: ext4 root found on %a disk\r\n",
                  pass == 0 ? "boot" : "non-boot (fallback)");
-        uefi_call_wrapper(ctx->bs->FreePool, 1, handles);
+        uefi_call_wrapper(bs->FreePool, 1, handles);
         return TRUE;
       }
     }
   }
 
-  uefi_call_wrapper(ctx->bs->FreePool, 1, handles);
+  uefi_call_wrapper(bs->FreePool, 1, handles);
   return FALSE;
 }
 
@@ -1059,10 +1071,13 @@ static BOOLEAN find_ext4_boot_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
  * Looks for a HARDDRIVE_DEVICE_PATH (Type=4, SubType=1) with SignatureType=2.
  * Returns TRUE and fills uuid_str[37] on success. */
 static BOOLEAN dp_get_partition_uuid(AppContext *ctx, CHAR8 uuid_str[37]) {
+  EFI_BOOT_SERVICES *bs = ctx->env->firmware;
+  if (!bs)
+    return FALSE;
   if (!ctx->boot_volume) return FALSE;
   static EFI_GUID dp_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
   EFI_DEVICE_PATH *dp = NULL;
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+  if (EFI_ERROR(uefi_call_wrapper(bs->HandleProtocol, 3,
                                    ctx->boot_volume, &dp_guid, (VOID **)&dp)))
     return FALSE;
   EFI_DEVICE_PATH *n = dp;
@@ -1168,8 +1183,7 @@ EFI_STATUS dt_build(
   /* Allocate 8 KB for the DT blob in the fixed boot-info block (>= 0x100000 so
    * it survives XNU's pmap_lowmem_finalize; see boot.h XNU_BOOTINFO_BASE). */
   EFI_PHYSICAL_ADDRESS dt_addr = XNU_DEVTREE_PHYS;
-  EFI_STATUS status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-      AllocateAddress,
+  EFI_STATUS status = ctx->env->allocate_pages(AllocateAddress,
       EfiLoaderData,
       XNU_DEVTREE_PAGES,
       &dt_addr);
@@ -1348,8 +1362,8 @@ EFI_STATUS dt_build(
     EFI_DEVICE_PATH *vol_dp = NULL;
     UINT32 vol_dp_len = 0;   /* bytes up to and including end node */
 
-    if (ctx->boot_volume &&
-        !EFI_ERROR(uefi_call_wrapper(ctx->bs->HandleProtocol, 3,
+    if (ctx->boot_volume && ctx->env->firmware &&
+        !EFI_ERROR(uefi_call_wrapper(ctx->env->firmware->HandleProtocol, 3,
                                      ctx->boot_volume, &dp_guid,
                                      (VOID **)&vol_dp)) && vol_dp) {
       /* Measure length: walk nodes until end node, add 4 for the end node */
@@ -1378,8 +1392,7 @@ EFI_STATUS dt_build(
       UINT32 file_dp_len = vol_prefix + fp_node_len + 4;
 
       UINT8 *file_dp_buf = NULL;
-      if (!EFI_ERROR(uefi_call_wrapper(ctx->bs->AllocatePool, 3,
-                                       EfiBootServicesData, file_dp_len,
+      if (!EFI_ERROR(ctx->env->allocate_pool(EfiBootServicesData, file_dp_len,
                                        (VOID **)&file_dp_buf))) {
         /* Copy volume path (without its end node) */
         if (vol_prefix)
@@ -1398,7 +1411,7 @@ EFI_STATUS dt_build(
         ep[0] = 0x7F; ep[1] = 0xFF; ep[2] = 0x04; ep[3] = 0x00;
 
         dt_prop(ctx, chosen, "boot-file-path", (VOID *)file_dp_buf, file_dp_len);
-        uefi_call_wrapper(ctx->bs->FreePool, 1, file_dp_buf);
+        ctx->env->free_pool(file_dp_buf);
       } else {
         dt_prop(ctx, chosen, "boot-file-path", (VOID *)devpath_end, 4);
       }
@@ -1422,7 +1435,8 @@ EFI_STATUS dt_build(
     EFI_RNG_PROTOCOL *rng = NULL;
     BOOLEAN got_rng = FALSE;
 
-    if (!EFI_ERROR(uefi_call_wrapper(ctx->bs->LocateProtocol, 3,
+    if (ctx->env->firmware &&
+        !EFI_ERROR(uefi_call_wrapper(ctx->env->firmware->LocateProtocol, 3,
                                      &rng_guid, NULL, (VOID **)&rng)) && rng) {
       /* MUST go through uefi_call_wrapper: firmware protocol methods use the
        * MS x64 ABI, our code is SysV. A direct rng->GetRNG(...) call passes
@@ -1509,8 +1523,7 @@ EFI_STATUS dt_build(
     EFI_STATUS tc_status = EFI_SUCCESS;
     if (tc_phys == 0) {
       tc_phys = XNU_TRUSTCACHE_PHYS;
-      tc_status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-          AllocateAddress, EfiLoaderData, 1, &tc_phys);
+      tc_status = ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, 1, &tc_phys);
     }
     if (!EFI_ERROR(tc_status)) {
       TrustCacheModule1Empty *tc = (TrustCacheModule1Empty *)(UINTN)tc_phys;
@@ -1615,15 +1628,15 @@ EFI_STATUS dt_build(
    * XNU uses this to locate ACPI without scanning memory.
    */
   log_info(L"DT: config-table loop (%lu entries)\r\n",
-           (UINT64)ctx->st->NumberOfTableEntries);
+           (UINT64)ctx->env->config_table_count);
   DeviceTreeNode *cfg_tbl = dt_create_node(ctx);
   dt_prop_str(ctx, cfg_tbl, "name", "configuration-table");
 
   static const EFI_GUID acpi20_guid = ACPI_20_TABLE_GUID;
   static const EFI_GUID acpi_guid   = ACPI_TABLE_GUID;
 
-  for (UINTN ci = 0; ci < ctx->st->NumberOfTableEntries; ci++) {
-    EFI_CONFIGURATION_TABLE *entry = &ctx->st->ConfigurationTable[ci];
+  for (UINTN ci = 0; ci < ctx->env->config_table_count; ci++) {
+    EFI_CONFIGURATION_TABLE *entry = &ctx->env->config_tables[ci];
 
     DeviceTreeNode *child = dt_create_node(ctx);
 
@@ -1673,7 +1686,7 @@ EFI_STATUS dt_build(
   {
     UINT64 rt_phys = rt_table_phys
         ? rt_table_phys
-        : (UINT64)(UINTN)(ctx->st->RuntimeServices);
+        : (UINT64)(UINTN)(ctx->env->runtime);
     dt_prop_u64(ctx, rt_svcs, "table", rt_phys);
   }
 
@@ -1701,14 +1714,14 @@ EFI_STATUS dt_build(
    * Length = (wcslen + 1) * 2 bytes (includes null terminator).
    */
   {
-    CHAR16 *vendor = ctx->st->FirmwareVendor;
+    CONST CHAR16 *vendor = ctx->env->firmware_vendor;
     UINTN wlen = dt_wcs_len(vendor);
     UINT32 blen = (UINT32)((wlen + 1) * 2);
     dt_prop(ctx, efi, "firmware-vendor", vendor, blen);
   }
 
   /* firmware-revision: 4-byte UINT32 from EFI System Table */
-  dt_prop_u32(ctx, efi, "firmware-revision", ctx->st->FirmwareRevision);
+  dt_prop_u32(ctx, efi, "firmware-revision", ctx->env->firmware_revision);
 
   /* firmware-abi: "EFI64" for 64-bit mode (efiMode=64 in boot_args) */
   dt_prop_str(ctx, efi, "firmware-abi", "EFI64");
@@ -1857,7 +1870,7 @@ EFI_STATUS dt_build(
   // the board's own nodes, compatible and model come over from the fdt
   status = dt_import_fdt(ctx, root, chosen);
   if (EFI_ERROR(status)) {
-    uefi_call_wrapper(ctx->bs->FreePages, 2, dt_addr, XNU_DEVTREE_PAGES);
+    ctx->env->free_pages(dt_addr, XNU_DEVTREE_PAGES);
     return status;
   }
 #else
@@ -1960,14 +1973,14 @@ EFI_STATUS dt_build(
   // measured first, a converted fdt can be larger than the buffer
   if (dt_flat_size(root) > dt_size) {
     log_info(L"DT: tree needs %u bytes, more than %u\r\n", dt_flat_size(root), (UINT32)dt_size);
-    uefi_call_wrapper(ctx->bs->FreePages, 2, dt_addr, XNU_DEVTREE_PAGES);
+    ctx->env->free_pages(dt_addr, XNU_DEVTREE_PAGES);
     return EFI_BUFFER_TOO_SMALL;
   }
 #endif
   UINT32 used = dt_flatten_node(root, dt_base);
   if (used > dt_size) {
     log_info(L"DT: overflow %u > %u\n", used, (UINT32)dt_size);
-    uefi_call_wrapper(ctx->bs->FreePages, 2, dt_addr, XNU_DEVTREE_PAGES);
+    ctx->env->free_pages(dt_addr, XNU_DEVTREE_PAGES);
     return EFI_BUFFER_TOO_SMALL;
   }
 

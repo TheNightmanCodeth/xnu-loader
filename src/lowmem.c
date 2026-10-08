@@ -25,13 +25,7 @@ EFI_STATUS lowmem_alloc_pages(
   out_buf->size = 0;
   out_buf->pages = 0;
 
-  status = uefi_call_wrapper(
-      ctx->bs->AllocatePages,
-      4,
-      AllocateMaxAddress,
-      type,
-      pages,
-      &addr);
+  status = ctx->env->allocate_pages(AllocateMaxAddress, type, pages, &addr);
   if (EFI_ERROR(status))
     return status;
 
@@ -72,11 +66,7 @@ VOID lowmem_free(
     return;
 
   if (buf->ptr != NULL && buf->pages != 0) {
-    uefi_call_wrapper(
-        ctx->bs->FreePages,
-        2,
-        buf->phys,
-        buf->pages);
+    ctx->env->free_pages(buf->phys, buf->pages);
   }
 
   buf->ptr = NULL;

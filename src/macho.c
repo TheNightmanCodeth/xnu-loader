@@ -144,9 +144,7 @@ VOID macho_unload_contiguous(
 
   UINTN pages = (UINTN)((result->image_size + EFI_PAGE_SIZE - 1) >> EFI_PAGE_SHIFT);
 
-  uefi_call_wrapper(
-      ctx->bs->FreePages, 2,
-      result->host_base,
+  ctx->env->free_pages(result->host_base,
       pages);
 
   SetMem(result, sizeof(*result), 0);
@@ -270,9 +268,7 @@ EFI_STATUS macho_load_segments(
        * on QEMU/OVMF. We copy to the target after EBS in efi_main.
        */
       EFI_PHYSICAL_ADDRESS staging = 0;
-      status = uefi_call_wrapper(
-          ctx->bs->AllocatePages, 4,
-          AllocateAnyPages,
+      status = ctx->env->allocate_pages(AllocateAnyPages,
           EfiLoaderData,
           pages,
           &staging);
@@ -353,9 +349,7 @@ VOID macho_unload_segments(
   for (UINTN i = 0; i < result->segment_count; i++) {
     MachoLoadedSegment *seg = &result->segments[i];
     if (seg->host_addr && seg->page_count) {
-      uefi_call_wrapper(
-          ctx->bs->FreePages, 2,
-          (EFI_PHYSICAL_ADDRESS)(UINTN)seg->host_addr,
+      ctx->env->free_pages((EFI_PHYSICAL_ADDRESS)(UINTN)seg->host_addr,
           seg->page_count);
     }
   }

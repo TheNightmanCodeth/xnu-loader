@@ -80,6 +80,7 @@ set(SOURCES
   src/boot.c
   src/console.c
   src/devtree.c
+  src/env-uefi.c
   src/fdt.c
   src/fdt_board.c
   src/devtree-fdt.c

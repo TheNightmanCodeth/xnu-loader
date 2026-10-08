@@ -57,16 +57,11 @@ static EFI_STATUS append_ramdisk_boot_arg(
 }
 
 static EFI_STATUS load_ramdisk(AppContext *ctx) {
-  EFI_FILE_PROTOCOL *root = NULL;
   FileBuffer image = {0};
   LowMemBuffer storage = {0};
   EFI_STATUS status;
 
-  status = app_open_self_volume(ctx, &root);
-  if (!EFI_ERROR(status)) {
-    status = file_read_all(ctx, root, L"\\ramdisk.img", &image);
-    uefi_call_wrapper(root->Close, 1, root);
-  }
+  status = file_read(ctx, L"\\ramdisk.img", BOOT_ENV_FILE_OWN_VOLUME, &image, NULL);
 
   if (EFI_ERROR(status)) {
     log_info(L"no ramdisk.img found (%r); continuing without RAMDisk\r\n", status);
@@ -88,8 +83,7 @@ static EFI_STATUS load_ramdisk(AppContext *ctx) {
          at < XNU_BOOTINFO_END + 64ULL * XNU_L2_BLOCK_SIZE;
          at = (at + XNU_L2_BLOCK_SIZE) & ~(XNU_L2_BLOCK_SIZE - 1)) {
       EFI_PHYSICAL_ADDRESS try_at = at;
-      if (!EFI_ERROR(uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-              AllocateAddress, EfiLoaderData, pages, &try_at))) {
+      if (!EFI_ERROR(ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, pages, &try_at))) {
         storage.ptr = (VOID *)(UINTN)try_at;
         storage.phys = try_at;
         storage.size = image.size;
@@ -174,8 +168,7 @@ static EFI_STATUS ReserveBootInfoGuard(AppContext *ctx,
   EFI_PHYSICAL_ADDRESS base = XNU_BOOTINFO_BASE;
   UINTN pages = (UINTN)((XNU_BOOTINFO_END - XNU_BOOTINFO_BASE) >> EFI_PAGE_SHIFT);
 
-  EFI_STATUS status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-      AllocateAddress, EfiLoaderData, pages, &base);
+  EFI_STATUS status = ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, pages, &base);
   if (EFI_ERROR(status)) {
     log_error(L"boot-info guard: AllocateAddress(0x%lx, %lu pages) failed: %r\r\n",
               (UINT64)XNU_BOOTINFO_BASE, (UINT64)pages, status);
@@ -196,8 +189,7 @@ static VOID ReleaseBootInfoGuard(AppContext *ctx,
   if (*guard_pages == 0)
     return;
 
-  EFI_STATUS status = uefi_call_wrapper(ctx->bs->FreePages, 2,
-      *guard_base, *guard_pages);
+  EFI_STATUS status = ctx->env->free_pages(*guard_base, *guard_pages);
   if (EFI_ERROR(status)) {
     log_error(L"boot-info guard: FreePages(0x%lx, %lu pages) failed: %r\r\n",
               (UINT64)*guard_base, (UINT64)*guard_pages, status);
@@ -228,14 +220,14 @@ static VOID FindXnuWindow(AppContext *ctx) {
   UINT32 desc_ver = 0;
   EFI_MEMORY_DESCRIPTOR *mm = NULL;
 
-  uefi_call_wrapper(ctx->bs->GetMemoryMap, 5, &map_size, mm, &key, &desc_size, &desc_ver);
+  ctx->env->memory_map(&map_size, mm, &key, &desc_size, &desc_ver);
   map_size += desc_size * 4;
 
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->AllocatePool, 3, EfiLoaderData, map_size, (VOID **)&mm)) || !mm)
+  if (EFI_ERROR(ctx->env->allocate_pool(EfiLoaderData, map_size, (VOID **)&mm)) || !mm)
     return;
 
-  if (EFI_ERROR(uefi_call_wrapper(ctx->bs->GetMemoryMap, 5, &map_size, mm, &key, &desc_size, &desc_ver))) {
-    uefi_call_wrapper(ctx->bs->FreePool, 1, mm);
+  if (EFI_ERROR(ctx->env->memory_map(&map_size, mm, &key, &desc_size, &desc_ver))) {
+    ctx->env->free_pool(mm);
     return;
   }
 
@@ -266,7 +258,7 @@ static VOID FindXnuWindow(AppContext *ctx) {
     }
   }
 
-  uefi_call_wrapper(ctx->bs->FreePool, 1, mm);
+  ctx->env->free_pool(mm);
   log_info(L"xnu window: 0x%lx - 0x%lx\r\n", g_xnu_window_lo, g_xnu_window_hi);
 }
 #endif
@@ -296,8 +288,7 @@ EFI_STATUS AllocKernelMemRegion(AppContext *ctx, UINT64 span_bytes, UINT64 virt_
     /* Claim the trustcache page below the image as part of this allocation;
      * grabbing it separately afterwards fails whenever UEFI already owns it. */
     base = try - XNU_BOOTINFO_ALIGN;
-    status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-      AllocateAddress, EfiLoaderData, total_pages, &base);
+    status = ctx->env->allocate_pages(AllocateAddress, EfiLoaderData, total_pages, &base);
     if (!EFI_ERROR(status)) {
       base = try;
       break;
@@ -323,8 +314,7 @@ EFI_STATUS AllocKernelMemRegion(AppContext *ctx, UINT64 span_bytes, UINT64 virt_
   EFI_PHYSICAL_ADDRESS base = 0x7FFFFFFF;
   UINTN total_pages = (UINTN)((span_bytes + EFI_PAGE_SIZE - 1) >> EFI_PAGE_SHIFT);
 
-  EFI_STATUS status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
-    AllocateMaxAddress, EfiLoaderData, total_pages, &base);
+  EFI_STATUS status = ctx->env->allocate_pages(AllocateMaxAddress, EfiLoaderData, total_pages, &base);
   if (EFI_ERROR(status)) {
     log_error(L"AllocKernelMemRegion: AllocatePages(%lu pages) failed: %r\r\n",
               (UINT64)total_pages, status);
@@ -342,7 +332,8 @@ EFI_STATUS AllocKernelMemRegion(AppContext *ctx, UINT64 span_bytes, UINT64 virt_
 #endif
 }
 
-EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
+/* The loader proper, under whichever boot environment started it (boot_env.h) */
+EFI_STATUS loader_main(BootEnv *env) {
   AppContext ctx;
   FileBuffer kernel = {0};
   MachoImage image_info;
@@ -355,7 +346,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
    * left as stack garbage they become a bogus /chosen RAMDisk and a post-EBS
    * cache clean over an unmapped range. This causes a silent hang on hardware */
   SetMem(&ctx, sizeof(ctx), 0);
-  status = app_init(&ctx, image, st);
+  status = app_init(&ctx, env);
   if (EFI_ERROR(status))
     return status;
 
@@ -389,24 +380,16 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   }
 #endif
 
-  {
-    EFI_LOADED_IMAGE *li = NULL;
-    if (!EFI_ERROR(app_get_loaded_image(&ctx, &li)))
-      log_info(L"loader image base=0x%lx size=0x%lx\r\n",
-               (UINT64)(UINTN)li->ImageBase, (UINT64)li->ImageSize);
-  }
+  if (env->loader_base)
+    log_info(L"loader image base=0x%lx size=0x%lx\r\n", env->loader_base, env->loader_size);
 
-  EFI_HANDLE found_handle = NULL;
+  VOID *found_handle = NULL;
 
-  status = file_read_all_from_any_volume(
-      &ctx,
-      L"\\EFI\\BOOT\\kernel",
-      &kernel,
-      &found_handle);
+  status = file_read(&ctx, L"\\EFI\\BOOT\\kernel", 0, &kernel, &found_handle);
 
   if (EFI_ERROR(status)) {
     log_info(L"no local kernel file (%r); trying TFTP (netboot)\r\n", status);
-    status = file_read_all_via_tftp(&ctx, (CONST CHAR8 *)"EFI/BOOT/kernel", &kernel);
+    status = file_read(&ctx, L"\\EFI\\BOOT\\kernel", BOOT_ENV_FILE_NETWORK, &kernel, NULL);
   }
 
   if (EFI_ERROR(status)) {
@@ -497,7 +480,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
                         ~(EFI_PHYSICAL_ADDRESS)(XNU_BOOTINFO_ALIGN - 1);
   log_info(L"arm64 bootinfo base=0x%lx (after kernel image)\r\n",
            (UINT64)g_xnu_bootinfo_base);
-  status = uefi_call_wrapper(ctx.bs->FreePages, 2, g_xnu_bootinfo_base,
+  status = ctx.env->free_pages(g_xnu_bootinfo_base,
       (UINTN)((XNU_BOOTINFO_END - XNU_BOOTINFO_BASE) >> EFI_PAGE_SHIFT));
   if (EFI_ERROR(status)) {
     log_error(L"bootinfo: FreePages(0x%lx) failed: %r\r\n",
@@ -594,11 +577,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   CONST CHAR8 *cmdline = "-v debug=0x219 -nogzalloc_mode keepsyms=1 serial=3 gopconsole=1";
   BOOLEAN cmdline_owned = FALSE;
   FileBuffer boot_args_file = {0};
-  EFI_STATUS args_status = file_read_all_from_any_volume(
-      &ctx,
-      L"\\EFI\\BOOT\\boot-args.txt",
-      &boot_args_file,
-      NULL);
+  EFI_STATUS args_status = file_read(&ctx, L"\\EFI\\BOOT\\boot-args.txt", 0,
+                                     &boot_args_file, NULL);
 
   if (!EFI_ERROR(args_status) && boot_args_file.size > 0) {
     UINTN len = boot_args_file.size;
@@ -611,7 +591,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
 
     if (len > 0) {
       CHAR8 *copy = NULL;
-      status = uefi_call_wrapper(ctx.bs->AllocatePool, 3, EfiLoaderData, len + 1, (VOID **)&copy);
+      status = ctx.env->allocate_pool(EfiLoaderData, len + 1, (VOID **)&copy);
       if (!EFI_ERROR(status)) {
         CopyMem(copy, bytes, len);
         copy[len] = '\0';
@@ -700,9 +680,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   EFI_PHYSICAL_ADDRESS stack_base = 0xFFFFFFFFULL;
   UINTN stack_pages = 16;
 
-  status = uefi_call_wrapper(
-      ctx.bs->AllocatePages, 4,
-      AllocateMaxAddress,
+  status = ctx.env->allocate_pages(AllocateMaxAddress,
       EfiLoaderData,
       stack_pages,
       &stack_base);
@@ -726,8 +704,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
    * memory map relocation, so the map XNU walks survives pmap_lowmem_finalize
    * (see common.h XNU_BOOTINFO_BASE). 16 pages = 64KB, ample for the map. */
   EFI_PHYSICAL_ADDRESS mm_fixed = XNU_MEMMAP_PHYS;
-  status = uefi_call_wrapper(ctx.bs->AllocatePages, 4,
-      AllocateAddress, EfiLoaderData, 16, &mm_fixed);
+  status = ctx.env->allocate_pages(AllocateAddress, EfiLoaderData, 16, &mm_fixed);
   if (EFI_ERROR(status)) {
     log_error(L"reloc: failed to alloc mmap pages: %r\r\n", status);
     return status;
@@ -764,7 +741,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
 #endif // VERBOSE_BOOT
 
   /* No logging after this point */
-  status = exit_boot_services_retry(&ctx, image, &boot_state);
+  status = exit_boot_services_retry(&ctx, &boot_state);
   if (EFI_ERROR(status)) {
     log_error(L"ExitBootServices failed: %r\r\n", status);
     return status;

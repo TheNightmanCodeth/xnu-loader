@@ -32,12 +32,12 @@ stdenv.mkDerivation {
       ${lib.optionalString (embeddedInitrd != null) "'-DEMBED_CPIO=\"${embeddedInitrd}\"'"}
     objects="$objects build/entry-embedded.S.o"
     for source in kernel/boot.c kernel/multiboot2.c kernel/linux.c kernel/cpio.c efi-emulation/exceptions.c \
-      efi-emulation/firmware.c efi-emulation/modfs.c efi-emulation/storage.c; do
+      efi-emulation/firmware.c efi-emulation/modfs.c efi-emulation/storage.c kernel/print.c; do
       object="build/$(basename "$(dirname "$source")")-$(basename "$source").o"
       $CC -c "$source" -o "$object" $common $includes
       objects="$objects $object"
     done
-    for source in src/main.c src/app.c src/boot.c src/console.c src/devtree.c src/fdt.c \
+    for source in src/main.c src/app.c src/boot.c src/console.c src/devtree.c src/env-uefi.c src/fdt.c \
       src/fileio.c src/jump.S src/lowmem.c src/macho.c src/serial.c; do
       object="build/src-$(basename "$source").o"
       $CC -c "$source" -o "$object" $common -maccumulate-outgoing-args -mno-avx \
