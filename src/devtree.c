@@ -3,6 +3,7 @@
 #include "app.h"
 #include "boot.h"
 #include "platform.h"
+#include "fdt.h"
 #include <efiprot.h>
 
 /* One NVRAM bank. 0x2000 is the conventional CHRP size and leaves room for the
@@ -375,83 +376,40 @@ static UINTN acpi_cpu_mpidrs(AppContext *ctx, UINT64 *out, UINTN max) {
 }
 
 // booti hands over an fdt and no acpi, so the cpu list comes from its /cpus node
-static UINT32 fdt_be32(const UINT8 *p) {
-  return (UINT32)p[0] << 24 | (UINT32)p[1] << 16 | (UINT32)p[2] << 8 | p[3];
-}
-
-static BOOLEAN fdt_str_eq(const CHAR8 *a, const CHAR8 *b) {
-  while (*a && *a == *b) {
-    ++a;
-    ++b;
-  }
-  return *a == *b;
-}
-
 static UINTN fdt_cpu_mpidrs(AppContext *ctx, UINT64 *out, UINTN max) {
-  static const EFI_GUID dtb_guid = { 0xb1b621d5, 0xf19c, 0x41a5,
-                                     { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
-  const UINT8 *h = NULL;
+  FdtWalk w;
   UINTN found = 0;
-
-  for (UINTN i = 0; i < ctx->st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
-    if (!CompareMem(&e->VendorGuid, &dtb_guid, sizeof(EFI_GUID)))
-      h = (const UINT8 *)e->VendorTable;
-  }
-  if (!h || fdt_be32(h) != 0xd00dfeedU)
-    return 0;
-
-  const UINT8 *st = h + fdt_be32(h + 8);
-  const CHAR8 *strings = (const CHAR8 *)(h + fdt_be32(h + 12));
-  UINT32 depth = 0, cells = 1;
+  UINT32 cells = 1;
   BOOLEAN in_cpus = FALSE, is_cpu = FALSE, disabled = FALSE, have_reg = FALSE;
   UINT64 reg = 0;
+  int ev;
 
-  for (;;) {
-    UINT32 tok = fdt_be32(st);
-    st += 4;
-    if (tok == 1) {                                    // begin node
-      const CHAR8 *name = (const CHAR8 *)st;
-      UINTN len = 0;
-      while (name[len])
-        ++len;
-      st += (len + 4) & ~3UL;
-      ++depth;
-      if (depth == 2)
-        in_cpus = fdt_str_eq(name, "cpus");
-      if (depth == 3 && in_cpus) {
+  if (!fdt_walk_init(&w, ctx->fdt))
+    return 0;
+  while ((ev = fdt_walk_next(&w)) != FDT_EV_DONE) {
+    if (ev == FDT_EV_BEGIN) {
+      if (w.depth == 2)
+        in_cpus = fdt_str_eq(w.name, "cpus");
+      if (w.depth == 3 && in_cpus) {
         is_cpu = disabled = have_reg = FALSE;
         reg = 0;
       }
-    } else if (tok == 2) {                             // end node
-      if (depth == 3 && in_cpus && is_cpu && have_reg && !disabled && found < max)
+    } else if (ev == FDT_EV_END) {
+      if (w.depth == 3 && in_cpus && is_cpu && have_reg && !disabled && found < max)
         out[found++] = reg;
-      if (depth == 2)
+      if (w.depth == 2)
         in_cpus = FALSE;
-      --depth;
-    } else if (tok == 3) {                             // property
-      UINT32 len = fdt_be32(st);
-      const CHAR8 *pname = strings + fdt_be32(st + 4);
-      const UINT8 *v = st + 8;
-      st += 8 + ((len + 3) & ~3U);
-      if (depth == 2 && in_cpus && fdt_str_eq(pname, "#address-cells") && len >= 4) {
-        cells = fdt_be32(v);
-      } else if (depth == 3 && in_cpus) {
-        if (fdt_str_eq(pname, "device_type"))
-          is_cpu = fdt_str_eq((const CHAR8 *)v, "cpu");
-        else if (fdt_str_eq(pname, "status"))
-          disabled = !fdt_str_eq((const CHAR8 *)v, "okay") && !fdt_str_eq((const CHAR8 *)v, "ok");
-        else if (fdt_str_eq(pname, "reg") && len >= 4 * cells) {
-          reg = 0;
-          for (UINT32 c = 0; c < cells; c++)
-            reg = reg << 32 | fdt_be32(v + 4 * c);
-          have_reg = TRUE;
-        }
+    } else if (w.depth == 2 && in_cpus && fdt_str_eq(w.prop, "#address-cells") && w.len >= 4) {
+      cells = fdt_be32(w.value);
+    } else if (w.depth == 3 && in_cpus) {
+      if (fdt_str_eq(w.prop, "device_type"))
+        is_cpu = fdt_str_eq((const CHAR8 *)w.value, "cpu");
+      else if (fdt_str_eq(w.prop, "status"))
+        disabled = !fdt_okay(w.value);
+      else if (fdt_str_eq(w.prop, "reg") && w.len >= 4 * cells) {
+        reg = fdt_cells(w.value, cells);
+        have_reg = TRUE;
       }
-    } else if (tok == 4) {                             // nop
-      continue;
-    } else {
-      break;
     }
   }
   return found;

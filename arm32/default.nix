@@ -13,7 +13,8 @@ assert platform == "auto" || platform == "qemuvirt" || platform == "rv1106"
 stdenv.mkDerivation {
   pname = "xnu-loader-arm32";
   version = "0.1";
-  src = ./.;
+  # the whole tree: the shim shares the device tree reader in src/fdt.c
+  src = ../.;
   dontConfigure = true;
 
   buildPhase = ''
@@ -21,10 +22,11 @@ stdenv.mkDerivation {
     flags="-march=armv7-a -marm -mfloat-abi=soft -ffreestanding -fno-builtin -fno-stack-protector"
     flags="$flags -nostdlib -fpie -O2 -Wall"
     ${lib.optionalString (platform != "auto") "flags=\"$flags -DXNU_LOADER_PLATFORM_${lib.toUpper platform}\""}
-    $CC $flags -c entry.S -o entry.o
-    $CC $flags -c boot.c -o boot.o
+    $CC $flags -c arm32/entry.S -o entry.o
+    $CC $flags -Iinclude -c arm32/boot.c -o boot.o
+    $CC $flags -Iinclude -c src/fdt.c -o fdt.o
     $LD -nostdlib -pie --no-dynamic-linker -z notext --no-warn-rwx-segments \
-      -T linker.ld -o boot32.elf entry.o boot.o "$($CC -print-libgcc-file-name)"
+      -T arm32/linker.ld -o boot32.elf entry.o boot.o fdt.o "$($CC -print-libgcc-file-name)"
     if $READELF -W -r boot32.elf | awk 'NR>2 && $3 ~ /^R_ARM/ && $3 != "R_ARM_RELATIVE" && $3 != "R_ARM_NONE"' | grep -q .; then
       $READELF -W -r boot32.elf | grep -v R_ARM_RELATIVE | head -20
       echo "non-relative dynamic relocations"; exit 1

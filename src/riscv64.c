@@ -10,6 +10,7 @@
 #include "macho.h"
 #include "serial.h"
 #include "riscv_efi_boot.h"
+#include "fdt.h"
 
 EFI_PHYSICAL_ADDRESS g_xnu_bootinfo_base;
 
@@ -18,10 +19,6 @@ EFI_PHYSICAL_ADDRESS g_xnu_bootinfo_base;
 #define SIZE_1G 0x40000000ULL
 // the kernel collection has to stay inside the top 2GB, where medany code reaches
 #define KC_WINDOW_LO 0xffffffff80000000ULL
-#define FDT_MAGIC 0xd00dfeedU
-
-static const EFI_GUID dtb_table_guid = { 0xb1b621d5, 0xf19c, 0x41a5,
-                                         { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
 
 typedef struct {
   UINT64 lo, hi;
@@ -29,10 +26,6 @@ typedef struct {
 
 static UINT64 align_up(UINT64 v, UINT64 a) {
   return (v + a - 1) & ~(a - 1);
-}
-
-static UINT32 be32(const UINT8 *p) {
-  return (UINT32)p[0] << 24 | (UINT32)p[1] << 16 | (UINT32)p[2] << 8 | p[3];
 }
 
 static EFI_STATUS get_memory_map(AppContext *ctx, EFI_MEMORY_DESCRIPTOR **out, UINTN *count,
@@ -158,17 +151,6 @@ static const CHAR8 *read_boot_args(AppContext *ctx) {
   return copy;
 }
 
-static const UINT8 *find_fdt(AppContext *ctx) {
-  for (UINTN i = 0; i < ctx->st->NumberOfTableEntries; i++) {
-    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
-    if (!CompareMem(&e->VendorGuid, &dtb_table_guid, sizeof(EFI_GUID))) {
-      const UINT8 *h = (const UINT8 *)e->VendorTable;
-      return h && be32(h) == FDT_MAGIC ? h : NULL;
-    }
-  }
-  return NULL;
-}
-
 static EFI_STATUS exit_boot_services(AppContext *ctx) {
   for (UINTN attempt = 0; attempt < 4; attempt++) {
     EFI_MEMORY_DESCRIPTOR *map;
@@ -211,12 +193,12 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     log_info(L"boot hart %lu\r\n", ctx.boot_hartid);
   }
 
-  const UINT8 *fdt = find_fdt(&ctx);
+  const UINT8 *fdt = ctx.fdt;
   if (!fdt) {
     log_error(L"no flattened device tree from firmware\r\n");
     return EFI_NOT_FOUND;
   }
-  UINT64 fdt_size = be32(fdt + 4);
+  UINT64 fdt_size = fdt_check(fdt);
 
   status = file_read_all_from_any_volume(&ctx, L"\\EFI\\BOOT\\kernel", &kernel, &ctx.boot_volume);
   if (EFI_ERROR(status)) {
@@ -328,12 +310,13 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   ctx.fdt_copy_phys = XNU_BOOTINFO_END;
   ctx.fdt_copy_size = fdt_size;
   CopyMem((VOID *)(UINTN)ctx.fdt_copy_phys, fdt, fdt_size);
-  // readers of the configuration table from here on, /efi included, see the copy the kernel keeps
+  // readers from here on, /efi's configuration table included, see the copy the kernel keeps
   for (UINTN i = 0; i < ctx.st->NumberOfTableEntries; i++) {
     EFI_CONFIGURATION_TABLE *e = &ctx.st->ConfigurationTable[i];
-    if (!CompareMem(&e->VendorGuid, &dtb_table_guid, sizeof(EFI_GUID)))
+    if (e->VendorTable == ctx.fdt)
       e->VendorTable = (VOID *)(UINTN)ctx.fdt_copy_phys;
   }
+  ctx.fdt = (CONST VOID *)(UINTN)ctx.fdt_copy_phys;
   if (ramdisk.size) {
     ctx.ramdisk_phys = ctx.fdt_copy_phys + fdt_space;
     ctx.ramdisk_size = ramdisk_space;

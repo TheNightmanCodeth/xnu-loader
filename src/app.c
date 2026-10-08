@@ -2,6 +2,19 @@
 #include "console.h"
 #include "serial.h"
 #include "platform.h"
+#include "fdt.h"
+
+// the tree the firmware installed as a configuration table, checked once here for every reader
+static CONST VOID *firmware_fdt(EFI_SYSTEM_TABLE *st) {
+  static EFI_GUID dtb_guid = { 0xb1b621d5, 0xf19c, 0x41a5, { 0x83, 0x0b, 0xd9, 0x15, 0x2c, 0x69, 0xaa, 0xe0 } };
+
+  for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
+    EFI_CONFIGURATION_TABLE *e = &st->ConfigurationTable[i];
+    if (!CompareMem(&e->VendorGuid, &dtb_guid, sizeof(EFI_GUID)))
+      return fdt_check(e->VendorTable) ? e->VendorTable : NULL;
+  }
+  return NULL;
+}
 
 EFI_STATUS app_init(AppContext *ctx, EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   if (!st)
@@ -20,10 +33,11 @@ EFI_STATUS app_init(AppContext *ctx, EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   ctx->rt = st->RuntimeServices;
 
   InitializeLib(image, st);
+  ctx->fdt = firmware_fdt(st);
 
 #if defined(__aarch64__) && defined(XNU_LOADER_PLATFORM_GENERIC)
   // the console and the rest of the board come from the firmware's device tree, else the build's defaults
-  fdt_board_parse(fdt_board_find(st));
+  fdt_board_parse(ctx->fdt);
 #endif
 
   /* Bring up the serial console before any logging so serial captures the full
