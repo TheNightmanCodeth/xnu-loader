@@ -1156,6 +1156,20 @@ static DeviceTreeNode *sc8280xp_soc(AppContext *ctx) {
   UINT64 tlmm_reg[2] = { 0xf100000ULL, 0x300000ULL };
   UINT32 tlmm_reserved[10] = { 70, 2, 74, 6, 125, 2, 128, 2, 154, 4 };
   UINT64 i2c_reg[2] = { 0x894000ULL, 0x4000ULL };
+  DeviceTreeNode *pcie = dt_create_node(ctx);
+  UINT64 pcie_reg[4] = { 0x3c000000ULL, 0xf1dULL, 0x3c100000ULL, 0x100000ULL };
+  UINT32 pcie_ranges[14] = {
+    0x01000000, 0x00000000, 0, 0x3c200000, 0, 0x00100000, 0,
+    0x02000000, 0x3c300000, 0, 0x3c300000, 0, 0x01d00000, 0,
+  };
+  UINT32 pcie_bus_range[2] = { 0, 0xff };
+  UINT32 pcie_int_mask[4] = { 0, 0, 0, 7 };
+  UINT32 pcie_int_map[24] = {
+    0, 0, 0, 1, SC8280XP_GIC_PHANDLE, 562,
+    0, 0, 0, 2, SC8280XP_GIC_PHANDLE, 563,
+    0, 0, 0, 3, SC8280XP_GIC_PHANDLE, 564,
+    0, 0, 0, 4, SC8280XP_GIC_PHANDLE, 565,
+  };
 
   dt_prop_str(ctx, soc, "name", "soc");
   dt_prop_str(ctx, soc, "compatible", "simple-bus");
@@ -1197,6 +1211,20 @@ static DeviceTreeNode *sc8280xp_soc(AppContext *ctx) {
     dt_add_child(ctx, i2c, hid);
   }
   dt_add_child(ctx, soc, i2c);
+  dt_prop_str(ctx, pcie, "name", "pcie@1c20000");
+  dt_prop_str(ctx, pcie, "device_type", "pci");
+  dt_prop_str(ctx, pcie, "compatible", "qcom,pcie-sc8280xp");
+  dt_prop(ctx, pcie, "reg", pcie_reg, sizeof(pcie_reg));
+  dt_prop(ctx, pcie, "reg-names", "dbi\0config", sizeof("dbi\0config"));
+  dt_prop_u32(ctx, pcie, "#address-cells", 3);
+  dt_prop_u32(ctx, pcie, "#size-cells", 2);
+  dt_prop(ctx, pcie, "ranges", pcie_ranges, sizeof(pcie_ranges));
+  dt_prop(ctx, pcie, "bus-range", pcie_bus_range, sizeof(pcie_bus_range));
+  dt_prop(ctx, pcie, "dma-coherent", NULL, 0);
+  dt_prop_u32(ctx, pcie, "#interrupt-cells", 1);
+  dt_prop(ctx, pcie, "interrupt-map-mask", pcie_int_mask, sizeof(pcie_int_mask));
+  dt_prop(ctx, pcie, "interrupt-map", pcie_int_map, sizeof(pcie_int_map));
+  dt_add_child(ctx, soc, pcie);
   return soc;
 }
 #endif
