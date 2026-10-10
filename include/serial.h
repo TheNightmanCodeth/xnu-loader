@@ -6,7 +6,8 @@
 /*
  * Minimal 16550 UART driver for early/bare-metal debug output.
  *
- * Targets COM3 (I/O base 0x3E8) at 115200 8N1.  Uses raw x86 port I/O, so it
+ * Targets COM1 (I/O base 0x3F8), or Intel AMT's Serial-over-LAN UART when the
+ * PCI scan finds one, at 115200 8N1.  Uses raw x86 port I/O, so it
  * works both before and after ExitBootServices (unlike ST->ConOut, which is
  * gone once boot services exit).  log_info/log_error mirror their formatted
  * output here so a serial cable can capture the whole boot on real hardware.
@@ -18,6 +19,12 @@ VOID serial_init(VOID);
 /* Re-apply that programming without the banner. Call after ExitBootServices,
  * whose teardown can leave the port in a non-transmitting state. */
 VOID serial_reinit(VOID);
+
+#if defined(PD_ARCH_X86)
+/* I/O base of the AMT Serial-over-LAN UART serial_init switched to, or 0 when
+ * it stayed on COM1. */
+UINT16 serial_amt_sol_port(VOID);
+#endif
 
 /* Emit a NUL-terminated narrow string (used for raw byte output). */
 VOID serial_puts8(CONST CHAR8 *s);

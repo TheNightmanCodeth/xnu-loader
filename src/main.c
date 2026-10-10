@@ -70,6 +70,40 @@ static VOID boot_keys_apply(AppContext *ctx, CONST CHAR8 **cmdline, BOOLEAN *own
   log_info(L"boot keys: using \"%a\"\r\n", copy);
 }
 
+#if defined(PD_ARCH_X86)
+// point XNU's legacy UART at the AMT SOL port the loader logs to, unless the boot args already pick one.
+// mmio_uart=0 keeps pexpert's LPSS probe, which runs first, from taking the console
+static VOID boot_args_apply_amt_sol(AppContext *ctx, CONST CHAR8 **cmdline, BOOLEAN *owned) {
+  static CONST CHAR8 hex[] = "0123456789abcdef";
+  CHAR8 suffix[] = " comport=0x0000 mmio_uart=0";
+  UINT16 port = serial_amt_sol_port();
+  CHAR8 *copy = NULL;
+  UINTN len = 0;
+
+  if (port == 0)
+    return;
+  for (const CHAR8 *p = *cmdline; *p; p++) {
+    if ((p == *cmdline || p[-1] == ' ') && CompareMem(p, "comport=", 8) == 0)
+      return;
+  }
+  for (UINTN i = 0; i < 4; i++)
+    suffix[11 + i] = hex[(port >> (12 - 4 * i)) & 0xF];
+
+  while ((*cmdline)[len] != '\0')
+    len++;
+  if (EFI_ERROR(app_alloc_pool(ctx, len + sizeof(suffix), (VOID **)&copy)))
+    return;
+  CopyMem(copy, *cmdline, len);
+  CopyMem(copy + len, suffix, sizeof(suffix));
+  if (*owned)
+    app_free_pool(ctx, (VOID *)(UINTN)*cmdline);
+  *cmdline = copy, *owned = TRUE;
+  log_info(L"AMT SOL UART at I/O 0x%x: using \"%a\"\r\n", (UINT32)port, copy);
+}
+#endif
+
+// unused while its call below is disabled
+__attribute__((unused))
 static EFI_STATUS append_ramdisk_boot_arg(
     AppContext *ctx, const CHAR8 **cmdline, BOOLEAN *owned) {
   const CHAR8 suffix[] = " ";
@@ -459,6 +493,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     log_info(L"no boot-args.txt found (%r); using default boot args\r\n", args_status);
   }
   boot_keys_apply(&ctx, &cmdline, &cmdline_owned);
+#if defined(PD_ARCH_X86)
+  boot_args_apply_amt_sol(&ctx, &cmdline, &cmdline_owned);
+#endif
   if (!boot_cmdline_has_flag(cmdline, (const CHAR8 *)"-v"))
     log_screen_quiet();
 

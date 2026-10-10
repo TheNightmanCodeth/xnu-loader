@@ -63,23 +63,81 @@ static VOID uart_puts(UINT16 b, CONST CHAR8 *s) {
 }
 
 /* Primary serial console port. COM1 (0x3F8) is what real hardware here
- * actually exposes; COM3 was dead on the target board. */
-#define SERIAL_BASE COM1_BASE
+ * actually exposes; COM3 was dead on the target board. Intel AMT's
+ * Serial-over-LAN UART replaces it when serial_init finds one. */
+static UINT16 serial_base = COM1_BASE;
+static UINT16 amt_sol_base;
+
+/* AMT's SOL UART is the ME's "KT" function: a 16550 (class 07/00/02) whose
+ * registers sit in an I/O BAR the firmware assigns, not at a COM port. */
+#define PCI_VENDOR_INTEL       0x8086
+#define PCI_CLASS_SERIAL_16550 0x070002
+
+static UINT16 serial_find_amt_sol(VOID) {
+  static EFI_GUID pci_io_guid = EFI_PCI_IO_PROTOCOL_GUID;
+  EFI_HANDLE *handles = NULL;
+  UINTN count = 0;
+  UINT16 base = 0;
+
+  if (BS == NULL ||
+      EFI_ERROR(uefi_call_wrapper(BS->LocateHandleBuffer, 5,
+                                  ByProtocol, &pci_io_guid, NULL, &count, &handles)))
+    return 0;
+
+  for (UINTN i = 0; i < count && base == 0; i++) {
+    EFI_PCI_IO_PROTOCOL *pci = NULL;
+    UINT32 id = 0, class_rev = 0, bar = 0;
+    UINT16 cmd = 0;
+
+    if (EFI_ERROR(uefi_call_wrapper(BS->HandleProtocol, 3,
+                                    handles[i], &pci_io_guid, (VOID **)&pci)))
+      continue;
+    if (EFI_ERROR(uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint32, 0x00, 1, &id)) ||
+        EFI_ERROR(uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint32, 0x08, 1, &class_rev)) ||
+        EFI_ERROR(uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint32, 0x10, 1, &bar)))
+      continue;
+    if ((id & 0xFFFF) != PCI_VENDOR_INTEL || (class_rev >> 8) != PCI_CLASS_SERIAL_16550)
+      continue;
+    // BAR0 must be an assigned I/O BAR
+    if ((bar & 1) == 0 || (bar & 0xFFFC) == 0)
+      continue;
+
+    // no firmware driver binds KT, so its I/O decode may still be off
+    if (!EFI_ERROR(uefi_call_wrapper(pci->Pci.Read, 5, pci, EfiPciIoWidthUint16, 0x04, 1, &cmd)) &&
+        (cmd & 1) == 0) {
+      cmd |= 1;
+      uefi_call_wrapper(pci->Pci.Write, 5, pci, EfiPciIoWidthUint16, 0x04, 1, &cmd);
+    }
+    base = (UINT16)(bar & 0xFFFC);
+  }
+
+  uefi_call_wrapper(BS->FreePool, 1, handles);
+  return base;
+}
 
 VOID serial_init(VOID) {
-  uart_program(SERIAL_BASE);
-  uart_puts(SERIAL_BASE, "SERIAL TEST COM1 (xnu-loader)\r\n");
+  amt_sol_base = serial_find_amt_sol();
+  if (amt_sol_base != 0)
+    serial_base = amt_sol_base;
+
+  uart_program(serial_base);
+  uart_puts(serial_base, amt_sol_base != 0 ? "SERIAL TEST AMT SOL (xnu-loader)\r\n"
+                                           : "SERIAL TEST COM1 (xnu-loader)\r\n");
 
   serial_ready = TRUE;
 }
 
 VOID serial_reinit(VOID) {
-  uart_program(SERIAL_BASE);
+  uart_program(serial_base);
   serial_ready = TRUE;
 }
 
+UINT16 serial_amt_sol_port(VOID) {
+  return amt_sol_base;
+}
+
 static VOID serial_putc(CHAR8 c) {
-  uart_putc(SERIAL_BASE, c);
+  uart_putc(serial_base, c);
 }
 
 #elif defined(__aarch64__) && defined(XNU_LOADER_PLATFORM_GENERIC)
